@@ -10,18 +10,21 @@ from image_similarity import ImageSimilarityDetector
 from image_stitch import stitch_images_horizontal, stitch_images_vertical, stitch_images_grid
 from image_split import split_image_horizontal, split_image_vertical, split_image_grid, auto_split_image
 from smart_split import SmartSplitDetector
+from text_remover import TextRemover
 
 
 class ImageToolGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("图像拼接拆分工具 v3.0")
-        self.root.geometry("950x800")
+        self.root.title("图像工具箱 v4.0")
+        self.root.geometry("950x850")
         
         self.detector = None
         self.smart_detector = SmartSplitDetector()
+        self.text_remover = TextRemover()
         self.image_paths = []
         self.split_batch_paths = []
+        self.text_remove_paths = []
         self.stitched_images = []
         
         self.progress_queue = queue.Queue()
@@ -41,12 +44,15 @@ class ImageToolGUI:
         
         stitch_frame = ttk.Frame(notebook, padding="10")
         split_frame = ttk.Frame(notebook, padding="10")
+        text_frame = ttk.Frame(notebook, padding="10")
         
         notebook.add(stitch_frame, text="图像拼接")
         notebook.add(split_frame, text="图像拆分")
+        notebook.add(text_frame, text="文字去除")
         
         self.create_stitch_tab(stitch_frame)
         self.create_split_tab(split_frame)
+        self.create_text_remove_tab(text_frame)
         
         self.status_var = tk.StringVar(value="就绪")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
@@ -179,6 +185,68 @@ class ImageToolGUI:
         ttk.Entry(output_frame, textvariable=self.split_base_name, width=50).grid(row=1, column=1, padx=5, pady=(10, 0))
         
         ttk.Button(parent, text="开始拆分", command=self.start_split).grid(row=3, column=0, pady=20)
+    
+    def create_text_remove_tab(self, parent):
+        input_frame = ttk.LabelFrame(parent, text="输入图片", padding="10")
+        input_frame.grid(row=0, column=0, sticky="nsew", pady=5)
+        
+        btn_frame = ttk.Frame(input_frame)
+        btn_frame.grid(row=0, column=0, columnspan=2, pady=5)
+        
+        ttk.Button(btn_frame, text="选择单张图片", command=self.select_text_remove_image).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_frame, text="批量选择图片", command=self.select_batch_text_remove_images).grid(row=0, column=1, padx=5)
+        ttk.Button(btn_frame, text="清空列表", command=self.clear_text_remove_image).grid(row=0, column=2, padx=5)
+        
+        list_frame = ttk.Frame(input_frame)
+        list_frame.grid(row=1, column=0, columnspan=2, pady=5, sticky="nsew")
+        
+        self.text_listbox = tk.Listbox(list_frame, height=6, selectmode=tk.EXTENDED)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.text_listbox.yview)
+        self.text_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        self.text_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        
+        options_frame = ttk.LabelFrame(parent, text="文字去除选项", padding="10")
+        options_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        
+        ttk.Label(options_frame, text="检测方法:").grid(row=0, column=0, sticky=tk.W)
+        self.text_detect_method = tk.StringVar(value="auto")
+        detect_combo = ttk.Combobox(options_frame, textvariable=self.text_detect_method,
+                                     values=["auto", "mser", "edge"], state="readonly", width=15)
+        detect_combo.grid(row=0, column=1, padx=5)
+        ttk.Label(options_frame, text="(auto自动选择最佳方法)").grid(row=0, column=2, padx=5, sticky=tk.W)
+        
+        ttk.Label(options_frame, text="膨胀大小:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.text_dilate_size = tk.IntVar(value=5)
+        ttk.Spinbox(options_frame, from_=1, to=20, textvariable=self.text_dilate_size, width=5).grid(row=1, column=1, pady=(10, 0), sticky=tk.W)
+        ttk.Label(options_frame, text="(扩展文字区域，防止遗漏边缘)").grid(row=1, column=2, padx=5, pady=(10, 0), sticky=tk.W)
+        
+        ttk.Label(options_frame, text="修复半径:").grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+        self.text_inpaint_radius = tk.IntVar(value=5)
+        ttk.Spinbox(options_frame, from_=1, to=30, textvariable=self.text_inpaint_radius, width=5).grid(row=2, column=1, pady=(10, 0), sticky=tk.W)
+        ttk.Label(options_frame, text="(修复区域半径，越大越平滑)").grid(row=2, column=2, padx=5, pady=(10, 0), sticky=tk.W)
+        
+        output_frame = ttk.LabelFrame(parent, text="输出设置", padding="10")
+        output_frame.grid(row=2, column=0, sticky="ew", pady=5)
+        
+        ttk.Label(output_frame, text="输出目录:").grid(row=0, column=0, sticky=tk.W)
+        self.text_output_dir = tk.StringVar()
+        ttk.Entry(output_frame, textvariable=self.text_output_dir, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(output_frame, text="浏览", command=self.browse_text_output_dir).grid(row=0, column=2)
+        
+        ttk.Label(output_frame, text="基础文件名:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.text_base_name = tk.StringVar(value="text_removed")
+        ttk.Entry(output_frame, textvariable=self.text_base_name, width=50).grid(row=1, column=1, padx=5, pady=(10, 0))
+        
+        btn_frame2 = ttk.Frame(parent)
+        btn_frame2.grid(row=3, column=0, pady=20)
+        
+        ttk.Button(btn_frame2, text="预览文字检测", command=self.preview_text_detection).grid(row=0, column=0, padx=10)
+        ttk.Button(btn_frame2, text="开始去除文字", command=self.start_text_remove).grid(row=0, column=1, padx=10)
     
     def on_split_mode_change(self, event=None):
         mode = self.split_mode.get()
@@ -347,11 +415,8 @@ class ImageToolGUI:
                     self.progress_queue.put(("status", f"创建输出目录: {output_dir}"))
                 
                 for img_idx, image_path in enumerate(self.split_batch_paths):
-                    print(f"[GUI] Processing image {img_idx+1}/{len(self.split_batch_paths)}: {image_path}")
-                    
                     if not os.path.exists(image_path):
                         error_msgs.append(f"图片不存在: {image_path}")
-                        print(f"[GUI] Error: image does not exist")
                         continue
                     
                     self.progress_queue.put(("status", f"正在处理: {os.path.basename(image_path)}"))
@@ -361,7 +426,6 @@ class ImageToolGUI:
                     output_paths = []
                     try:
                         if mode == "ai_smart":
-                            self.progress_queue.put(("status", f"调用AI智能检测..."))
                             output_paths = self.smart_detector.smart_split(image_path, output_dir, img_base)
                         elif mode == "auto":
                             n_parts = self.split_parts.get()
@@ -397,6 +461,131 @@ class ImageToolGUI:
                 self.progress_queue.put(("error", f"错误:\n{traceback.format_exc()}"))
         
         threading.Thread(target=split_thread, daemon=True).start()
+    
+    def select_text_remove_image(self):
+        file = filedialog.askopenfilename(
+            title="选择要去除文字的图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.gif"), ("所有文件", "*.*")]
+        )
+        if file:
+            self.text_remove_paths = [file]
+            self.text_listbox.delete(0, tk.END)
+            self.text_listbox.insert(tk.END, os.path.basename(file))
+    
+    def select_batch_text_remove_images(self):
+        files = filedialog.askopenfilenames(
+            title="批量选择要去除文字的图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.gif"), ("所有文件", "*.*")]
+        )
+        if files:
+            self.text_remove_paths = list(files)
+            self.text_listbox.delete(0, tk.END)
+            for f in files:
+                self.text_listbox.insert(tk.END, os.path.basename(f))
+    
+    def clear_text_remove_image(self):
+        self.text_remove_paths.clear()
+        self.text_listbox.delete(0, tk.END)
+    
+    def browse_text_output_dir(self):
+        directory = filedialog.askdirectory(title="选择输出目录")
+        if directory:
+            self.text_output_dir.set(directory)
+    
+    def preview_text_detection(self):
+        if not self.text_remove_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        
+        output_dir = self.text_output_dir.get()
+        if not output_dir:
+            messagebox.showwarning("警告", "请选择输出目录！")
+            return
+        
+        self.status_var.set("正在生成预览...")
+        self.progress.start()
+        
+        def preview_thread():
+            try:
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                detect_method = self.text_detect_method.get()
+                
+                for img_path in self.text_remove_paths:
+                    base_name = os.path.splitext(os.path.basename(img_path))[0]
+                    preview_path = os.path.join(output_dir, f"{base_name}_preview.png")
+                    
+                    success = self.text_remover.preview_text_detection(img_path, preview_path, detect_method)
+                    if success:
+                        self.progress_queue.put(("status", f"预览已保存: {preview_path}"))
+                
+                self.progress_queue.put(("success", f"预览生成完成！\n输出目录: {output_dir}\n红色区域为检测到的文字区域"))
+                
+            except Exception as e:
+                import traceback
+                self.progress_queue.put(("error", f"错误:\n{traceback.format_exc()}"))
+        
+        threading.Thread(target=preview_thread, daemon=True).start()
+    
+    def start_text_remove(self):
+        if not self.text_remove_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        
+        output_dir = self.text_output_dir.get()
+        if not output_dir:
+            messagebox.showwarning("警告", "请选择输出目录！")
+            return
+        
+        self.status_var.set("正在去除文字...")
+        self.progress.start()
+        
+        def remove_thread():
+            try:
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                detect_method = self.text_detect_method.get()
+                dilate_size = self.text_dilate_size.get()
+                inpaint_radius = self.text_inpaint_radius.get()
+                base_name = self.text_base_name.get()
+                
+                success_count = 0
+                error_msgs = []
+                
+                for img_idx, img_path in enumerate(self.text_remove_paths):
+                    self.progress_queue.put(("status", f"正在处理: {os.path.basename(img_path)}"))
+                    
+                    img_base = f"{base_name}_{img_idx + 1}" if len(self.text_remove_paths) > 1 else base_name
+                    output_path = os.path.join(output_dir, f"{img_base}.png")
+                    
+                    try:
+                        success = self.text_remover.remove_text(
+                            img_path, output_path,
+                            dilate_size=dilate_size,
+                            inpaint_radius=inpaint_radius,
+                            detection_method=detect_method
+                        )
+                        if success:
+                            success_count += 1
+                        else:
+                            error_msgs.append(f"{os.path.basename(img_path)}: 处理失败")
+                    except Exception as e:
+                        error_msgs.append(f"{os.path.basename(img_path)}: {str(e)}")
+                
+                if error_msgs:
+                    self.progress_queue.put(("error", f"部分失败:\n" + "\n".join(error_msgs)))
+                elif success_count > 0:
+                    self.progress_queue.put(("success", f"文字去除完成！\n成功处理 {success_count} 张图片\n输出目录: {output_dir}"))
+                else:
+                    self.progress_queue.put(("error", "处理失败，未生成任何输出文件"))
+                
+            except Exception as e:
+                import traceback
+                self.progress_queue.put(("error", f"错误:\n{traceback.format_exc()}"))
+        
+        threading.Thread(target=remove_thread, daemon=True).start()
     
     def check_progress_queue(self):
         try:
