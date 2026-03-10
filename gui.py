@@ -16,7 +16,7 @@ from text_remover import TextRemover
 class ImageToolGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("图像工具箱 v4.0")
+        self.root.title("图像工具箱 v5.0")
         self.root.geometry("950x850")
         
         self.detector = None
@@ -25,6 +25,7 @@ class ImageToolGUI:
         self.image_paths = []
         self.split_batch_paths = []
         self.text_remove_paths = []
+        self.rename_paths = []
         self.stitched_images = []
         
         self.progress_queue = queue.Queue()
@@ -45,14 +46,17 @@ class ImageToolGUI:
         stitch_frame = ttk.Frame(notebook, padding="10")
         split_frame = ttk.Frame(notebook, padding="10")
         text_frame = ttk.Frame(notebook, padding="10")
+        rename_frame = ttk.Frame(notebook, padding="10")
         
         notebook.add(stitch_frame, text="图像拼接")
         notebook.add(split_frame, text="图像拆分")
         notebook.add(text_frame, text="文字去除")
+        notebook.add(rename_frame, text="批量重命名")
         
         self.create_stitch_tab(stitch_frame)
         self.create_split_tab(split_frame)
         self.create_text_remove_tab(text_frame)
+        self.create_rename_tab(rename_frame)
         
         self.status_var = tk.StringVar(value="就绪")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
@@ -247,6 +251,87 @@ class ImageToolGUI:
         
         ttk.Button(btn_frame2, text="预览文字检测", command=self.preview_text_detection).grid(row=0, column=0, padx=10)
         ttk.Button(btn_frame2, text="开始去除文字", command=self.start_text_remove).grid(row=0, column=1, padx=10)
+    
+    def create_rename_tab(self, parent):
+        input_frame = ttk.LabelFrame(parent, text="选择图片", padding="10")
+        input_frame.grid(row=0, column=0, sticky="nsew", pady=5)
+        
+        btn_frame = ttk.Frame(input_frame)
+        btn_frame.grid(row=0, column=0, columnspan=2, pady=5)
+        
+        ttk.Button(btn_frame, text="选择图片", command=self.select_rename_images).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_frame, text="清空列表", command=self.clear_rename_images).grid(row=0, column=1, padx=5)
+        
+        list_frame = ttk.Frame(input_frame)
+        list_frame.grid(row=1, column=0, columnspan=2, pady=5, sticky="nsew")
+        
+        self.rename_listbox = tk.Listbox(list_frame, height=8, selectmode=tk.EXTENDED)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.rename_listbox.yview)
+        self.rename_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        self.rename_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        
+        options_frame = ttk.LabelFrame(parent, text="重命名选项", padding="10")
+        options_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        
+        ttk.Label(options_frame, text="命名模式:").grid(row=0, column=0, sticky=tk.W)
+        self.rename_mode = tk.StringVar(value="prefix_number")
+        mode_combo = ttk.Combobox(options_frame, textvariable=self.rename_mode,
+                                   values=["prefix_number", "prefix_suffix", "replace_text", "lowercase", "uppercase"],
+                                   state="readonly", width=20)
+        mode_combo.grid(row=0, column=1, padx=5, columnspan=2)
+        mode_combo.bind("<<ComboboxSelected>>", self.on_rename_mode_change)
+        
+        ttk.Label(options_frame, text="前缀:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.rename_prefix = tk.StringVar(value="image")
+        ttk.Entry(options_frame, textvariable=self.rename_prefix, width=30).grid(row=1, column=1, padx=5, pady=(10, 0), columnspan=2)
+        
+        ttk.Label(options_frame, text="后缀:").grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+        self.rename_suffix = tk.StringVar(value="")
+        ttk.Entry(options_frame, textvariable=self.rename_suffix, width=30).grid(row=2, column=1, padx=5, pady=(10, 0), columnspan=2)
+        
+        ttk.Label(options_frame, text="起始序号:").grid(row=3, column=0, sticky=tk.W, pady=(10, 0))
+        self.rename_start_num = tk.IntVar(value=1)
+        ttk.Spinbox(options_frame, from_=0, to=9999, textvariable=self.rename_start_num, width=10).grid(row=3, column=1, padx=5, pady=(10, 0), sticky=tk.W)
+        
+        ttk.Label(options_frame, text="序号位数:").grid(row=3, column=2, padx=(20, 5), pady=(10, 0), sticky=tk.W)
+        self.rename_num_digits = tk.IntVar(value=3)
+        ttk.Spinbox(options_frame, from_=1, to=10, textvariable=self.rename_num_digits, width=5).grid(row=3, column=3, pady=(10, 0))
+        
+        ttk.Label(options_frame, text="查找文本:").grid(row=4, column=0, sticky=tk.W, pady=(10, 0))
+        self.rename_find_text = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=self.rename_find_text, width=30).grid(row=4, column=1, padx=5, pady=(10, 0), columnspan=2)
+        
+        ttk.Label(options_frame, text="替换为:").grid(row=5, column=0, sticky=tk.W, pady=(10, 0))
+        self.rename_replace_text = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=self.rename_replace_text, width=30).grid(row=5, column=1, padx=5, pady=(10, 0), columnspan=2)
+        
+        self.on_rename_mode_change()
+        
+        preview_frame = ttk.LabelFrame(parent, text="预览", padding="10")
+        preview_frame.grid(row=2, column=0, sticky="nsew", pady=5)
+        
+        self.rename_preview_text = tk.Text(preview_frame, height=8, wrap=tk.NONE)
+        preview_scrollbar_y = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=self.rename_preview_text.yview)
+        preview_scrollbar_x = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=self.rename_preview_text.xview)
+        self.rename_preview_text.configure(yscrollcommand=preview_scrollbar_y.set, xscrollcommand=preview_scrollbar_x.set)
+        
+        self.rename_preview_text.grid(row=0, column=0, sticky="nsew")
+        preview_scrollbar_y.grid(row=0, column=1, sticky="ns")
+        preview_scrollbar_x.grid(row=1, column=0, sticky="ew")
+        
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+        
+        btn_frame2 = ttk.Frame(parent)
+        btn_frame2.grid(row=3, column=0, pady=20)
+        
+        ttk.Button(btn_frame2, text="预览重命名", command=self.preview_rename).grid(row=0, column=0, padx=10)
+        ttk.Button(btn_frame2, text="执行重命名", command=self.execute_rename).grid(row=0, column=1, padx=10)
     
     def on_split_mode_change(self, event=None):
         mode = self.split_mode.get()
@@ -612,6 +697,165 @@ class ImageToolGUI:
             pass
         
         self.root.after(100, self.check_progress_queue)
+    
+    def select_rename_images(self):
+        files = filedialog.askopenfilenames(
+            title="选择要重命名的图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"), ("所有文件", "*.*")]
+        )
+        if files:
+            self.rename_paths = list(files)
+            self.rename_listbox.delete(0, tk.END)
+            for f in files:
+                self.rename_listbox.insert(tk.END, os.path.basename(f))
+            self.preview_rename()
+    
+    def clear_rename_images(self):
+        self.rename_paths.clear()
+        self.rename_listbox.delete(0, tk.END)
+        self.rename_preview_text.delete(1.0, tk.END)
+    
+    def on_rename_mode_change(self, event=None):
+        mode = self.rename_mode.get()
+        
+        is_prefix_number = mode == "prefix_number"
+        is_prefix_suffix = mode == "prefix_suffix"
+        is_replace = mode == "replace_text"
+        
+        if is_replace:
+            self.rename_find_text.set("")
+            self.rename_replace_text.set("")
+    
+    def generate_new_name(self, old_name: str, index: int) -> str:
+        mode = self.rename_mode.get()
+        prefix = self.rename_prefix.get()
+        suffix = self.rename_suffix.get()
+        start_num = self.rename_start_num.get()
+        num_digits = self.rename_num_digits.get()
+        
+        name_without_ext, ext = os.path.splitext(old_name)
+        
+        if mode == "prefix_number":
+            num = start_num + index
+            new_name = f"{prefix}{str(num).zfill(num_digits)}"
+        elif mode == "prefix_suffix":
+            new_name = f"{prefix}{name_without_ext}{suffix}"
+        elif mode == "replace_text":
+            find_str = self.rename_find_text.get()
+            replace_str = self.rename_replace_text.get()
+            new_name = name_without_ext.replace(find_str, replace_str)
+        elif mode == "lowercase":
+            new_name = name_without_ext.lower()
+        elif mode == "uppercase":
+            new_name = name_without_ext.upper()
+        else:
+            new_name = name_without_ext
+        
+        return f"{new_name}{ext}"
+    
+    def preview_rename(self):
+        if not self.rename_paths:
+            self.rename_preview_text.delete(1.0, tk.END)
+            self.rename_preview_text.insert(tk.END, "请先选择图片")
+            return
+        
+        self.rename_preview_text.delete(1.0, tk.END)
+        self.rename_preview_text.insert(tk.END, "原文件名 -> 新文件名\n")
+        self.rename_preview_text.insert(tk.END, "-" * 60 + "\n")
+        
+        used_names = set()
+        for index, path in enumerate(self.rename_paths):
+            old_name = os.path.basename(path)
+            new_name = self.generate_new_name(old_name, index)
+            dir_path = os.path.dirname(path)
+            new_path = os.path.join(dir_path, new_name)
+            
+            name_without_ext, ext = os.path.splitext(new_name)
+            counter = 1
+            final_name = new_name
+            final_path = new_path
+            
+            while final_name in used_names or (os.path.exists(final_path) and final_path != path):
+                final_name = f"{name_without_ext}_{counter}{ext}"
+                final_path = os.path.join(dir_path, final_name)
+                counter += 1
+            
+            used_names.add(final_name)
+            self.rename_preview_text.insert(tk.END, f"{old_name} -> {final_name}\n")
+    
+    def execute_rename(self):
+        if not self.rename_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        
+        rename_pairs = []
+        errors = []
+        used_names = set()
+        
+        for index, path in enumerate(self.rename_paths):
+            if not os.path.exists(path):
+                errors.append(f"文件不存在: {path}")
+                continue
+            
+            old_name = os.path.basename(path)
+            new_name = self.generate_new_name(old_name, index)
+            dir_path = os.path.dirname(path)
+            new_path = os.path.join(dir_path, new_name)
+            
+            if path == new_path:
+                continue
+            
+            name_without_ext, ext = os.path.splitext(new_name)
+            counter = 1
+            final_name = new_name
+            final_path = new_path
+            
+            while final_name in used_names or (os.path.exists(final_path) and final_path != path):
+                final_name = f"{name_without_ext}_{counter}{ext}"
+                final_path = os.path.join(dir_path, final_name)
+                counter += 1
+            
+            used_names.add(final_name)
+            rename_pairs.append((path, final_path, old_name, final_name))
+        
+        if errors:
+            messagebox.showwarning("警告", "以下问题需要处理:\n" + "\n".join(errors))
+        
+        if not rename_pairs:
+            messagebox.showinfo("提示", "没有需要重命名的文件")
+            return
+        
+        success_count = 0
+        failed = []
+        
+        import uuid
+        temp_pairs = []
+        for old_path, new_path, old_name, new_name in rename_pairs:
+            temp_path = old_path + f".tmp_{uuid.uuid4().hex}"
+            try:
+                os.rename(old_path, temp_path)
+                temp_pairs.append((temp_path, new_path, old_name, new_name))
+            except Exception as e:
+                failed.append(f"{old_name}: {str(e)}")
+        
+        for temp_path, new_path, old_name, new_name in temp_pairs:
+            try:
+                os.rename(temp_path, new_path)
+                success_count += 1
+            except Exception as e:
+                failed.append(f"{old_name}: {str(e)}")
+                try:
+                    original_name = old_name
+                    dir_path = os.path.dirname(temp_path)
+                    os.rename(temp_path, os.path.join(dir_path, original_name))
+                except:
+                    pass
+        
+        if failed:
+            messagebox.showerror("错误", f"成功: {success_count} 个\n失败:\n" + "\n".join(failed))
+        else:
+            messagebox.showinfo("成功", f"重命名完成！\n成功处理 {success_count} 个文件")
+            self.clear_rename_images()
 
 
 def main():

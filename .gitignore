@@ -36,6 +36,8 @@ env/
 # Test outputs
 test_output/
 test_out/
+final_test/
+output_test/
 test_*.png
 test_*.jpg
 
@@ -45,3 +47,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Debug scripts
+run_debug.bat
+test_split.py
+test_text_removal.bat

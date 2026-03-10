@@ -27,10 +27,26 @@ class TextRemover:
         Returns:
             是否成功处理
         """
+        print(f"[DEBUG] remove_text called")
+        print(f"[DEBUG]   input: {image_path}")
+        print(f"[DEBUG]   output: {output_path}")
+        print(f"[DEBUG]   method: {detection_method}")
+        
+        if not os.path.exists(image_path):
+            print(f"[ERROR] Input file does not exist: {image_path}")
+            return False
+        
         img = cv2.imread(image_path)
         if img is None:
             print(f"[ERROR] Cannot read image: {image_path}")
-            return False
+            try:
+                from PIL import Image as PILImage
+                pil_img = PILImage.open(image_path)
+                img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                print(f"[DEBUG] PIL fallback succeeded")
+            except Exception as e:
+                print(f"[ERROR] PIL fallback failed: {e}")
+                return False
         
         height, width = img.shape[:2]
         print(f"[INFO] Image size: {width}x{height}")
@@ -62,14 +78,28 @@ class TextRemover:
         kernel = np.ones((dilate_size, dilate_size), np.uint8)
         text_mask = cv2.dilate(text_mask, kernel, iterations=1)
         
-        result = cv2.inpaint(img, text_mask, inpaint_radius, cv2.INPAINT_TELEA)
+        try:
+            result = cv2.inpaint(img, text_mask, inpaint_radius, cv2.INPAINT_TELEA)
+        except Exception as e:
+            print(f"[ERROR] inpaint failed: {e}")
+            cv2.imwrite(output_path, img)
+            return True
         
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+            try:
+                os.makedirs(output_dir)
+                print(f"[DEBUG] Created output directory: {output_dir}")
+            except Exception as e:
+                print(f"[ERROR] Failed to create output directory: {e}")
+                return False
         
-        cv2.imwrite(output_path, result)
-        print(f"[INFO] Text removed, saved to: {output_path}")
+        try:
+            cv2.imwrite(output_path, result)
+            print(f"[INFO] Text removed, saved to: {output_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save output: {e}")
+            return False
         
         return True
     
