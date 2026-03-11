@@ -8,23 +8,23 @@ import math
 
 class SmartSplitDetector:
     def __init__(self):
-        self.min_panel_size = 50
+        self.min_panel_size = 100
+        self.overlap_margin = 30
     
     def smart_split(self, image_path: str, output_dir: str, base_name: str) -> List[str]:
-        print(f"[DEBUG] smart_split called: image={image_path}, output_dir={output_dir}, base_name={base_name}")
+        print(f"[DEBUG] smart_split: {image_path}")
         
         panels = self.detect_all_panels(image_path)
         print(f"[DEBUG] Detected {len(panels)} panels")
         
         if not panels:
-            print(f"[DEBUG] No panels detected, returning empty list")
             return []
         
         try:
             image = Image.open(image_path)
-            print(f"[DEBUG] Image opened successfully: {image.size}")
+            print(f"[DEBUG] Image size: {image.size}")
         except Exception as e:
-            print(f"[DEBUG] Failed to open image: {e}")
+            print(f"[ERROR] Cannot open image: {e}")
             return []
         
         if output_dir and not os.path.exists(output_dir):
@@ -40,304 +40,252 @@ class SmartSplitDetector:
                 output_path_full = os.path.join(output_dir, output_filename)
                 cropped.save(output_path_full)
                 output_paths.append(output_path_full)
-                print(f"[DEBUG] Saved: {output_path_full}")
+                print(f"[DEBUG] Saved panel {idx}: ({x1},{y1})-({x2},{y2}), size={x2-x1}x{y2-y1}")
             except Exception as e:
-                print(f"[DEBUG] Failed to save panel {idx}: {e}")
+                print(f"[ERROR] Failed to save panel {idx}: {e}")
         
         image.close()
-        print(f"[DEBUG] smart_split complete, {len(output_paths)} files saved")
         return output_paths
     
     def detect_all_panels(self, image_path: str) -> List[Tuple[int, int, int, int]]:
+        """检测所有面板区域"""
         print(f"[DEBUG] detect_all_panels: {image_path}")
-        print(f"[DEBUG] File exists: {os.path.exists(image_path)}")
         
         if not os.path.exists(image_path):
-            print(f"[ERROR] Image file does not exist: {image_path}")
+            print(f"[ERROR] File not found: {image_path}")
             return []
         
         img = cv2.imread(image_path)
-        print(f"[DEBUG] cv2.imread result: {img is not None}")
-        
         if img is None:
-            print(f"[ERROR] Cannot read image with cv2: {image_path}")
             try:
                 from PIL import Image as PILImage
                 pil_img = PILImage.open(image_path)
                 img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-                print(f"[DEBUG] PIL fallback succeeded, shape: {img.shape}")
+                print(f"[DEBUG] PIL fallback succeeded")
             except Exception as e:
-                print(f"[ERROR] PIL fallback also failed: {e}")
+                print(f"[ERROR] Cannot read image: {e}")
                 return []
         
         height, width = img.shape[:2]
         print(f"[DEBUG] Image dimensions: {width}x{height}")
         
-        panels = []
+        # 检测分割线
+        h_split_lines, v_split_lines = self._detect_main_split_lines(img)
         
-        panels = self._detect_panels_by_white_space(img)
+        print(f"[DEBUG] Horizontal split lines: {h_split_lines}")
+        print(f"[DEBUG] Vertical split lines: {v_split_lines}")
         
-        if len(panels) <= 1:
-            panels = self._detect_panels_by_contours(img)
+        # 创建面板
+        panels = self._create_panels(h_split_lines, v_split_lines, width, height)
         
-        if len(panels) <= 1:
-            panels = self._detect_panels_by_edges(img)
+        # 添加重叠
+        panels = self._add_overlap(panels, width, height)
+        
+        # 过滤太小的面板
+        panels = [p for p in panels if (p[2] - p[0]) >= self.min_panel_size and (p[3] - p[1]) >= self.min_panel_size]
         
         if not panels:
             panels = [(0, 0, width, height)]
         
-        panels = self._merge_overlapping_panels(panels)
-        
-        panels = [p for p in panels if (p[2] - p[0]) >= self.min_panel_size and (p[3] - p[1]) >= self.min_panel_size]
-        
         return panels
     
-    def _detect_panels_by_white_space(self, img: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """通过检测空白区域来分割面板"""
+    def _detect_main_split_lines(self, img: np.ndarray) -> Tuple[List[int], List[int]]:
+        """检测主要的分割线"""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape
         
-        _, binary = cv2.threshold(gray, 250, 255, cv2.THRESH_BINARY)
+        # 方法1: 检测明显的空白分隔线
+        h_lines1, v_lines1 = self._detect_whitespace_lines(gray)
         
+        # 方法2: 检测边缘分隔
+        h_lines2, v_lines2 = self._detect_edge_lines(gray)
+        
+        # 合并结果，优先使用空白检测
+        h_lines = h_lines1 if len(h_lines1) >= len(h_lines2) else h_lines2
+        v_lines = v_lines1 if len(v_lines1) >= len(v_lines2) else v_lines2
+        
+        return h_lines, v_lines
+    
+    def _detect_whitespace_lines(self, gray: np.ndarray) -> Tuple[List[int], List[int]]:
+        """检测空白分隔线"""
+        height, width = gray.shape
+        
+        # 检测白色或接近白色的背景
+        _, binary = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
+        
+        # 水平投影 - 每行白色像素数量
         h_projection = np.sum(binary, axis=1)
+        h_max = width * 255
+        h_threshold = h_max * 0.95  # 95%以上是白色
+        
+        # 找到连续的空白行
+        h_lines = self._find_continuous_gaps(h_projection, h_threshold, height, min_continuous=20)
+        
+        # 垂直投影
         v_projection = np.sum(binary, axis=0)
+        v_max = height * 255
+        v_threshold = v_max * 0.95
         
-        h_threshold = width * 255 * 0.9
-        v_threshold = height * 255 * 0.9
+        v_lines = self._find_continuous_gaps(v_projection, v_threshold, width, min_continuous=20)
         
-        h_gaps = []
+        return h_lines, v_lines
+    
+    def _detect_edge_lines(self, gray: np.ndarray) -> Tuple[List[int], List[int]]:
+        """通过边缘密度检测分割线"""
+        height, width = gray.shape
+        
+        # 边缘检测
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # 水平边缘密度
+        h_edges = np.sum(edges, axis=1)
+        h_threshold = np.mean(h_edges) * 0.2
+        
+        # 找低边缘密度的区域
+        h_lines = self._find_low_density_regions(h_edges, h_threshold, min_width=30)
+        
+        # 垂直边缘密度
+        v_edges = np.sum(edges, axis=0)
+        v_threshold = np.mean(v_edges) * 0.2
+        
+        v_lines = self._find_low_density_regions(v_edges, v_threshold, min_width=30)
+        
+        return h_lines, v_lines
+    
+    def _find_continuous_gaps(self, projection: np.ndarray, threshold: float, 
+                               total_length: int, min_continuous: int = 20) -> List[int]:
+        """找到连续的空白区域，返回分割线位置"""
+        gaps = []
         in_gap = False
         gap_start = 0
-        for i, val in enumerate(h_projection):
-            if val >= h_threshold:
+        
+        for i, val in enumerate(projection):
+            if val >= threshold:
                 if not in_gap:
                     in_gap = True
                     gap_start = i
             else:
                 if in_gap:
-                    if i - gap_start >= 10:
-                        h_gaps.append((gap_start + i) // 2)
+                    gap_len = i - gap_start
+                    if gap_len >= min_continuous:
+                        # 分割线在空白区域的中间
+                        gaps.append(gap_start + gap_len // 2)
                     in_gap = False
         
-        v_gaps = []
-        in_gap = False
-        gap_start = 0
-        for i, val in enumerate(v_projection):
-            if val >= v_threshold:
-                if not in_gap:
-                    in_gap = True
-                    gap_start = i
+        return gaps
+    
+    def _find_low_density_regions(self, data: np.ndarray, threshold: float, 
+                                    min_width: int = 30) -> List[int]:
+        """找到低密度区域"""
+        lines = []
+        in_low = False
+        low_start = 0
+        
+        for i, val in enumerate(data):
+            if val < threshold:
+                if not in_low:
+                    in_low = True
+                    low_start = i
             else:
-                if in_gap:
-                    if i - gap_start >= 10:
-                        v_gaps.append((gap_start + i) // 2)
-                    in_gap = False
+                if in_low:
+                    width = i - low_start
+                    if width >= min_width:
+                        lines.append(low_start + width // 2)
+                    in_low = False
         
-        panels = []
-        
-        if v_gaps and not h_gaps:
-            x_positions = [0] + v_gaps + [width]
-            for i in range(len(x_positions) - 1):
-                if x_positions[i + 1] - x_positions[i] >= self.min_panel_size:
-                    panels.append((x_positions[i], 0, x_positions[i + 1], height))
-        elif h_gaps and not v_gaps:
-            y_positions = [0] + h_gaps + [height]
-            for i in range(len(y_positions) - 1):
-                if y_positions[i + 1] - y_positions[i] >= self.min_panel_size:
-                    panels.append((0, y_positions[i], width, y_positions[i + 1]))
-        elif h_gaps and v_gaps:
-            x_positions = [0] + v_gaps + [width]
-            y_positions = [0] + h_gaps + [height]
-            for yi in range(len(y_positions) - 1):
-                for xi in range(len(x_positions) - 1):
-                    x1, y1 = x_positions[xi], y_positions[yi]
-                    x2, y2 = x_positions[xi + 1], y_positions[yi + 1]
-                    if x2 - x1 >= self.min_panel_size and y2 - y1 >= self.min_panel_size:
-                        panels.append((x1, y1, x2, y2))
-        
-        return panels
+        return lines
     
-    def _detect_panels_by_contours(self, img: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """通过轮廓检测面板"""
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        height, width = gray.shape
-        
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        edges = cv2.Canny(blurred, 50, 150)
-        
-        kernel = np.ones((3, 3), np.uint8)
-        edges = cv2.dilate(edges, kernel, iterations=2)
-        edges = cv2.erode(edges, kernel, iterations=1)
-        
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+    def _create_panels(self, h_lines: List[int], v_lines: List[int], 
+                        width: int, height: int) -> List[Tuple[int, int, int, int]]:
+        """根据分割线创建面板"""
         panels = []
-        min_area = height * width * 0.005
-        padding = 5
         
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            if w * h >= min_area:
-                x1 = max(0, x - padding)
-                y1 = max(0, y - padding)
-                x2 = min(width, x + w + padding)
-                y2 = min(height, y + h + padding)
-                panels.append((x1, y1, x2, y2))
-        
-        return panels
-    
-    def _detect_panels_by_edges(self, img: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """通过边缘和形态学操作检测面板"""
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        height, width = gray.shape
-        
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        
-        abs_sobel_x = np.abs(sobel_x).astype(np.uint8)
-        abs_sobel_y = np.abs(sobel_y).astype(np.uint8)
-        
-        h_edges = np.sum(abs_sobel_y, axis=1)
-        v_edges = np.sum(abs_sobel_x, axis=0)
-        
-        h_threshold = np.mean(h_edges) + np.std(h_edges) * 0.5
-        v_threshold = np.mean(v_edges) + np.std(v_edges) * 0.5
-        
-        h_lines = []
-        for i in range(1, len(h_edges) - 1):
-            if h_edges[i] > h_threshold and h_edges[i] > h_edges[i-1] and h_edges[i] > h_edges[i+1]:
-                h_lines.append(i)
-        
-        v_lines = []
-        for i in range(1, len(v_edges) - 1):
-            if v_edges[i] > v_threshold and v_edges[i] > v_edges[i-1] and v_edges[i] > v_edges[i+1]:
-                v_lines.append(i)
-        
-        h_lines = self._merge_close_lines(h_lines, 30)
-        v_lines = self._merge_close_lines(v_lines, 30)
-        
-        panels = []
+        if not h_lines and not v_lines:
+            # 没有分割线，返回整图
+            return [(0, 0, width, height)]
         
         if v_lines and not h_lines:
+            # 只有垂直分割
             x_positions = [0] + v_lines + [width]
             for i in range(len(x_positions) - 1):
-                if x_positions[i + 1] - x_positions[i] >= self.min_panel_size:
-                    panels.append((x_positions[i], 0, x_positions[i + 1], height))
+                panels.append((x_positions[i], 0, x_positions[i + 1], height))
         elif h_lines and not v_lines:
+            # 只有水平分割
             y_positions = [0] + h_lines + [height]
             for i in range(len(y_positions) - 1):
-                if y_positions[i + 1] - y_positions[i] >= self.min_panel_size:
-                    panels.append((0, y_positions[i], width, y_positions[i + 1]))
+                panels.append((0, y_positions[i], width, y_positions[i + 1]))
         elif h_lines and v_lines:
+            # 网格分割
             x_positions = [0] + v_lines + [width]
             y_positions = [0] + h_lines + [height]
             for yi in range(len(y_positions) - 1):
                 for xi in range(len(x_positions) - 1):
-                    x1, y1 = x_positions[xi], y_positions[yi]
-                    x2, y2 = x_positions[xi + 1], y_positions[yi + 1]
-                    if x2 - x1 >= self.min_panel_size and y2 - y1 >= self.min_panel_size:
-                        panels.append((x1, y1, x2, y2))
+                    panels.append((
+                        x_positions[xi],
+                        y_positions[yi],
+                        x_positions[xi + 1],
+                        y_positions[yi + 1]
+                    ))
         
         return panels
     
-    def _merge_close_lines(self, lines: List[int], min_gap: int) -> List[int]:
-        if not lines:
-            return []
-        
-        lines = sorted(lines)
-        merged = [lines[0]]
-        
-        for line in lines[1:]:
-            if line - merged[-1] >= min_gap:
-                merged.append(line)
-            else:
-                merged[-1] = (merged[-1] + line) // 2
-        
-        return merged
-    
-    def _merge_overlapping_panels(self, panels: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+    def _add_overlap(self, panels: List[Tuple[int, int, int, int]], 
+                      width: int, height: int) -> List[Tuple[int, int, int, int]]:
+        """为相邻面板添加重叠区域"""
         if len(panels) <= 1:
             return panels
         
-        panels = sorted(panels, key=lambda p: (p[0], p[1]))
+        # 判断是水平还是垂直排列
+        if len(panels) == 1:
+            return panels
         
-        merged = []
+        # 检查是否水平排列（y坐标相近）
+        y_starts = [p[1] for p in panels]
+        y_same = max(y_starts) - min(y_starts) < self.min_panel_size
         
-        for panel in panels:
-            if not merged:
-                merged.append(list(panel))
-                continue
-            
-            last = merged[-1]
-            
-            overlap_x = min(last[2], panel[2]) - max(last[0], panel[0])
-            overlap_y = min(last[3], panel[3]) - max(last[1], panel[1])
-            
-            iou = 0
-            if overlap_x > 0 and overlap_y > 0:
-                intersection = overlap_x * overlap_y
-                area1 = (last[2] - last[0]) * (last[3] - last[1])
-                area2 = (panel[2] - panel[0]) * (panel[3] - panel[1])
-                union = area1 + area2 - intersection
-                iou = intersection / union if union > 0 else 0
-            
-            if iou > 0.5:
-                last[0] = min(last[0], panel[0])
-                last[1] = min(last[1], panel[1])
-                last[2] = max(last[2], panel[2])
-                last[3] = max(last[3], panel[3])
-            else:
-                merged.append(list(panel))
+        # 检查是否垂直排列（x坐标相近）
+        x_starts = [p[0] for p in panels]
+        x_same = max(x_starts) - min(x_starts) < self.min_panel_size
         
-        return [tuple(p) for p in merged]
+        overlapped = []
+        
+        if y_same and not x_same:
+            # 水平排列
+            panels = sorted(panels, key=lambda p: p[0])
+            for i, (x1, y1, x2, y2) in enumerate(panels):
+                new_x1 = max(0, x1 - self.overlap_margin) if i > 0 else x1
+                new_x2 = min(width, x2 + self.overlap_margin) if i < len(panels) - 1 else x2
+                overlapped.append((new_x1, y1, new_x2, y2))
+        elif x_same and not y_same:
+            # 垂直排列
+            panels = sorted(panels, key=lambda p: p[1])
+            for i, (x1, y1, x2, y2) in enumerate(panels):
+                new_y1 = max(0, y1 - self.overlap_margin) if i > 0 else y1
+                new_y2 = min(height, y2 + self.overlap_margin) if i < len(panels) - 1 else y2
+                overlapped.append((x1, new_y1, x2, new_y2))
+        else:
+            # 网格排列，按位置排序
+            panels = sorted(panels, key=lambda p: (p[1], p[0]))
+            
+            # 找出唯一的x和y边界
+            x_boundaries = sorted(set([p[0] for p in panels] + [p[2] for p in panels]))
+            y_boundaries = sorted(set([p[1] for p in panels] + [p[3] for p in panels]))
+            
+            for x1, y1, x2, y2 in panels:
+                new_x1 = max(0, x1 - self.overlap_margin)
+                new_y1 = max(0, y1 - self.overlap_margin)
+                new_x2 = min(width, x2 + self.overlap_margin)
+                new_y2 = min(height, y2 + self.overlap_margin)
+                overlapped.append((new_x1, new_y1, new_x2, new_y2))
+        
+        return overlapped
     
     def detect_split_lines(self, image_path: str, min_gap: int = 20) -> Tuple[List[int], List[int], str]:
         img = cv2.imread(image_path)
         if img is None:
             return [], [], "horizontal"
         
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        height, width = gray.shape
-        
-        _, binary = cv2.threshold(gray, 250, 255, cv2.THRESH_BINARY)
-        
-        h_projection = np.sum(binary, axis=1)
-        v_projection = np.sum(binary, axis=0)
-        
-        h_threshold = width * 255 * 0.9
-        v_threshold = height * 255 * 0.9
-        
-        h_lines = []
-        in_gap = False
-        gap_start = 0
-        for i, val in enumerate(h_projection):
-            if val >= h_threshold:
-                if not in_gap:
-                    in_gap = True
-                    gap_start = i
-            else:
-                if in_gap:
-                    if i - gap_start >= min_gap:
-                        h_lines.append((gap_start + i) // 2)
-                    in_gap = False
-        
-        v_lines = []
-        in_gap = False
-        gap_start = 0
-        for i, val in enumerate(v_projection):
-            if val >= v_threshold:
-                if not in_gap:
-                    in_gap = True
-                    gap_start = i
-            else:
-                if in_gap:
-                    if i - gap_start >= min_gap:
-                        v_lines.append((gap_start + i) // 2)
-                    in_gap = False
-        
-        h_lines = self._merge_close_lines(h_lines, min_gap)
-        v_lines = self._merge_close_lines(v_lines, min_gap)
+        h_lines, v_lines = self._detect_main_split_lines(img)
         
         if len(v_lines) >= len(h_lines):
             mode = "horizontal"
@@ -347,4 +295,5 @@ class SmartSplitDetector:
         return h_lines, v_lines, mode
     
     def detect_panels_by_content(self, image_path: str, padding: int = 3) -> List[Tuple[int, int, int, int]]:
+        self.overlap_margin = padding
         return self.detect_all_panels(image_path)
