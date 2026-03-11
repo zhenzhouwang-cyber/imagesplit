@@ -105,7 +105,8 @@ class BackgroundRemover:
 
             # 确保输出目录存在
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-            result.save(output_path)
+            # 显式指定 PNG 格式，避免 PIL 因扩展名无法识别而报错
+            result.save(output_path, format="PNG")
             return True
 
         except Exception as e:
@@ -176,7 +177,7 @@ class BackgroundRemover:
             mask.paste(white, mask=alpha)
 
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-            mask.save(output_path)
+            mask.save(output_path, format="PNG")
             return True
 
         except Exception as e:
