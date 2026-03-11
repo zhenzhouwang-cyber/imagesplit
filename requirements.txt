@@ -6,3 +6,5 @@ opencv-python>=4.8.0
 torch>=2.0.0
 torchvision>=0.15.0
 transformers>=4.30.0
+rembg>=2.0.50
+onnxruntime>=1.16.0

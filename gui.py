@@ -11,20 +11,23 @@ from image_stitch import stitch_images_horizontal, stitch_images_vertical, stitc
 from image_split import split_image_horizontal, split_image_vertical, split_image_grid, auto_split_image
 from smart_split import SmartSplitDetector
 from text_remover import TextRemover
+from background_remover import BackgroundRemover
 
 
 class ImageToolGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("图像工具箱 v5.0")
+        self.root.title("图像工具箱 v6.0")
         self.root.geometry("950x850")
         
         self.detector = None
         self.smart_detector = SmartSplitDetector()
         self.text_remover = TextRemover()
+        self.bg_remover = BackgroundRemover()
         self.image_paths = []
         self.split_batch_paths = []
         self.text_remove_paths = []
+        self.bg_remove_paths = []
         self.rename_paths = []
         self.stitched_images = []
         
@@ -46,16 +49,19 @@ class ImageToolGUI:
         stitch_frame = ttk.Frame(notebook, padding="10")
         split_frame = ttk.Frame(notebook, padding="10")
         text_frame = ttk.Frame(notebook, padding="10")
+        bg_frame = ttk.Frame(notebook, padding="10")
         rename_frame = ttk.Frame(notebook, padding="10")
-        
+
         notebook.add(stitch_frame, text="图像拼接")
         notebook.add(split_frame, text="图像拆分")
         notebook.add(text_frame, text="文字去除")
+        notebook.add(bg_frame, text="背景去除")
         notebook.add(rename_frame, text="批量重命名")
-        
+
         self.create_stitch_tab(stitch_frame)
         self.create_split_tab(split_frame)
         self.create_text_remove_tab(text_frame)
+        self.create_bg_remove_tab(bg_frame)
         self.create_rename_tab(rename_frame)
         
         self.status_var = tk.StringVar(value="就绪")
@@ -252,6 +258,343 @@ class ImageToolGUI:
         ttk.Button(btn_frame2, text="预览文字检测", command=self.preview_text_detection).grid(row=0, column=0, padx=10)
         ttk.Button(btn_frame2, text="开始去除文字", command=self.start_text_remove).grid(row=0, column=1, padx=10)
     
+    def create_bg_remove_tab(self, parent):
+        # ── 输入图片 ──────────────────────────────────────────────────────
+        input_frame = ttk.LabelFrame(parent, text="输入图片", padding="10")
+        input_frame.grid(row=0, column=0, sticky="nsew", pady=5)
+
+        btn_frame = ttk.Frame(input_frame)
+        btn_frame.grid(row=0, column=0, columnspan=2, pady=5)
+
+        ttk.Button(btn_frame, text="选择单张图片",
+                   command=self.select_bg_remove_image).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_frame, text="批量选择图片",
+                   command=self.select_batch_bg_remove_images).grid(row=0, column=1, padx=5)
+        ttk.Button(btn_frame, text="清空列表",
+                   command=self.clear_bg_remove_images).grid(row=0, column=2, padx=5)
+
+        list_frame = ttk.Frame(input_frame)
+        list_frame.grid(row=1, column=0, columnspan=2, pady=5, sticky="nsew")
+
+        self.bg_listbox = tk.Listbox(list_frame, height=6, selectmode=tk.EXTENDED)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.bg_listbox.yview)
+        self.bg_listbox.configure(yscrollcommand=scrollbar.set)
+        self.bg_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        # ── 去除选项 ──────────────────────────────────────────────────────
+        options_frame = ttk.LabelFrame(parent, text="去除选项", padding="10")
+        options_frame.grid(row=1, column=0, sticky="ew", pady=5)
+
+        ttk.Label(options_frame, text="AI 模型:").grid(row=0, column=0, sticky=tk.W)
+        self.bg_model = tk.StringVar(value="u2net")
+        model_combo = ttk.Combobox(
+            options_frame, textvariable=self.bg_model,
+            values=["u2net", "u2net_human_seg", "isnet-general-use"],
+            state="readonly", width=22,
+        )
+        model_combo.grid(row=0, column=1, padx=5)
+        ttk.Label(options_frame,
+                  text="(u2net 通用 / u2net_human_seg 人像 / isnet 更新通用)").grid(
+            row=0, column=2, padx=5, sticky=tk.W)
+
+        ttk.Label(options_frame, text="背景填充:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.bg_fill_mode = tk.StringVar(value="transparent")
+        fill_combo = ttk.Combobox(
+            options_frame, textvariable=self.bg_fill_mode,
+            values=["transparent", "white", "black", "custom"],
+            state="readonly", width=12,
+        )
+        fill_combo.grid(row=1, column=1, padx=5, pady=(10, 0), sticky=tk.W)
+        fill_combo.bind("<<ComboboxSelected>>", self._on_bg_fill_change)
+        ttk.Label(options_frame,
+                  text="transparent = 透明 PNG，其他为纯色背景").grid(
+            row=1, column=2, padx=5, pady=(10, 0), sticky=tk.W)
+
+        ttk.Label(options_frame, text="自定义颜色 (R,G,B):").grid(
+            row=2, column=0, sticky=tk.W, pady=(10, 0))
+        self.bg_custom_color = tk.StringVar(value="255,255,255")
+        self.bg_custom_entry = ttk.Entry(options_frame, textvariable=self.bg_custom_color, width=15)
+        self.bg_custom_entry.grid(row=2, column=1, padx=5, pady=(10, 0), sticky=tk.W)
+        self.bg_custom_entry.config(state="disabled")
+
+        ttk.Label(options_frame, text="精细边缘 (Alpha Matting):").grid(
+            row=3, column=0, sticky=tk.W, pady=(10, 0))
+        self.bg_alpha_matting = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, variable=self.bg_alpha_matting,
+                        text="启用（头发/毛发更精细，速度较慢）",
+                        command=self._on_alpha_matting_change).grid(
+            row=3, column=1, columnspan=2, padx=5, pady=(10, 0), sticky=tk.W)
+
+        self.am_fg_label = ttk.Label(options_frame, text="前景阈值:")
+        self.am_fg_label.grid(row=4, column=0, sticky=tk.W, pady=(5, 0))
+        self.bg_am_fg = tk.IntVar(value=240)
+        self.am_fg_spin = ttk.Spinbox(options_frame, from_=0, to=255,
+                                       textvariable=self.bg_am_fg, width=6)
+        self.am_fg_spin.grid(row=4, column=1, pady=(5, 0), sticky=tk.W)
+
+        self.am_bg_label = ttk.Label(options_frame, text="背景阈值:")
+        self.am_bg_label.grid(row=5, column=0, sticky=tk.W, pady=(5, 0))
+        self.bg_am_bg = tk.IntVar(value=10)
+        self.am_bg_spin = ttk.Spinbox(options_frame, from_=0, to=255,
+                                       textvariable=self.bg_am_bg, width=6)
+        self.am_bg_spin.grid(row=5, column=1, pady=(5, 0), sticky=tk.W)
+
+        self.am_erode_label = ttk.Label(options_frame, text="腐蚀大小:")
+        self.am_erode_label.grid(row=6, column=0, sticky=tk.W, pady=(5, 0))
+        self.bg_am_erode = tk.IntVar(value=10)
+        self.am_erode_spin = ttk.Spinbox(options_frame, from_=0, to=50,
+                                          textvariable=self.bg_am_erode, width=6)
+        self.am_erode_spin.grid(row=6, column=1, pady=(5, 0), sticky=tk.W)
+
+        # 初始隐藏 alpha matting 参数
+        self._on_alpha_matting_change()
+
+        # ── 输出设置 ──────────────────────────────────────────────────────
+        output_frame = ttk.LabelFrame(parent, text="输出设置", padding="10")
+        output_frame.grid(row=2, column=0, sticky="ew", pady=5)
+
+        # 覆盖原图选项
+        self.bg_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            output_frame, variable=self.bg_overwrite,
+            text="覆盖原图（直接替换源文件，透明背景时自动转为 .png）",
+            command=self._on_bg_overwrite_change,
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
+
+        self.bg_out_dir_label = ttk.Label(output_frame, text="输出目录:")
+        self.bg_out_dir_label.grid(row=1, column=0, sticky=tk.W)
+        self.bg_output_dir = tk.StringVar()
+        self.bg_out_dir_entry = ttk.Entry(output_frame, textvariable=self.bg_output_dir, width=50)
+        self.bg_out_dir_entry.grid(row=1, column=1, padx=5)
+        self.bg_out_dir_btn = ttk.Button(output_frame, text="浏览",
+                                          command=self.browse_bg_output_dir)
+        self.bg_out_dir_btn.grid(row=1, column=2)
+
+        self.bg_base_label = ttk.Label(output_frame, text="基础文件名:")
+        self.bg_base_label.grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+        self.bg_base_name = tk.StringVar(value="nobg")
+        self.bg_base_entry = ttk.Entry(output_frame, textvariable=self.bg_base_name, width=50)
+        self.bg_base_entry.grid(row=2, column=1, padx=5, pady=(10, 0))
+
+        # ── 按钮 ──────────────────────────────────────────────────────────
+        btn_frame2 = ttk.Frame(parent)
+        btn_frame2.grid(row=3, column=0, pady=20)
+
+        ttk.Button(btn_frame2, text="预览主体 Mask",
+                   command=self.preview_bg_mask).grid(row=0, column=0, padx=10)
+        ttk.Button(btn_frame2, text="开始去除背景",
+                   command=self.start_bg_remove).grid(row=0, column=1, padx=10)
+
+    # ── 背景去除：辅助方法 ─────────────────────────────────────────────────
+
+    def _on_bg_overwrite_change(self):
+        """覆盖原图模式开关：禁用/启用输出目录和文件名字段。"""
+        state = "disabled" if self.bg_overwrite.get() else "normal"
+        for w in (self.bg_out_dir_entry, self.bg_out_dir_btn,
+                  self.bg_base_entry):
+            w.config(state=state)
+
+    def _on_bg_fill_change(self, event=None):
+        state = "normal" if self.bg_fill_mode.get() == "custom" else "disabled"
+        self.bg_custom_entry.config(state=state)
+
+    def _on_alpha_matting_change(self):
+        state = "normal" if self.bg_alpha_matting.get() else "disabled"
+        for w in (self.am_fg_spin, self.am_bg_spin, self.am_erode_spin):
+            w.config(state=state)
+
+    def _get_bg_color(self):
+        """根据界面选项返回背景色元组或 None（透明）。"""
+        mode = self.bg_fill_mode.get()
+        if mode == "transparent":
+            return None
+        if mode == "white":
+            return (255, 255, 255)
+        if mode == "black":
+            return (0, 0, 0)
+        # custom
+        try:
+            parts = [int(x.strip()) for x in self.bg_custom_color.get().split(",")]
+            if len(parts) == 3:
+                return tuple(parts)
+        except Exception:
+            pass
+        return None
+
+    def select_bg_remove_image(self):
+        file = filedialog.askopenfilename(
+            title="选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp"), ("所有文件", "*.*")],
+        )
+        if file:
+            self.bg_remove_paths = [file]
+            self.bg_listbox.delete(0, tk.END)
+            self.bg_listbox.insert(tk.END, os.path.basename(file))
+
+    def select_batch_bg_remove_images(self):
+        files = filedialog.askopenfilenames(
+            title="批量选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp"), ("所有文件", "*.*")],
+        )
+        if files:
+            self.bg_remove_paths = list(files)
+            self.bg_listbox.delete(0, tk.END)
+            for f in files:
+                self.bg_listbox.insert(tk.END, os.path.basename(f))
+
+    def clear_bg_remove_images(self):
+        self.bg_remove_paths.clear()
+        self.bg_listbox.delete(0, tk.END)
+
+    def browse_bg_output_dir(self):
+        directory = filedialog.askdirectory(title="选择输出目录")
+        if directory:
+            self.bg_output_dir.set(directory)
+
+    def preview_bg_mask(self):
+        if not self.bg_remove_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        output_dir = self.bg_output_dir.get()
+        if not output_dir:
+            messagebox.showwarning("警告", "请选择输出目录！")
+            return
+
+        self.status_var.set("正在生成主体 Mask 预览...")
+        self.progress.start()
+
+        def preview_thread():
+            try:
+                model = self.bg_model.get()
+                self.bg_remover.set_model(model)
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+
+                for img_path in self.bg_remove_paths:
+                    base = os.path.splitext(os.path.basename(img_path))[0]
+                    out = os.path.join(output_dir, f"{base}_mask_preview.png")
+                    self.bg_remover.preview_mask(img_path, out)
+                    self.progress_queue.put(("status", f"预览已保存: {out}"))
+
+                self.progress_queue.put((
+                    "success",
+                    f"Mask 预览完成！\n白色区域 = 检测到的主体\n输出目录: {output_dir}",
+                ))
+            except Exception as e:
+                import traceback
+                self.progress_queue.put(("error", traceback.format_exc()))
+
+        threading.Thread(target=preview_thread, daemon=True).start()
+
+    def start_bg_remove(self):
+        if not self.bg_remove_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+
+        overwrite = self.bg_overwrite.get()
+
+        if not overwrite:
+            output_dir = self.bg_output_dir.get()
+            if not output_dir:
+                messagebox.showwarning("警告", "请选择输出目录！")
+                return
+            base_name = self.bg_base_name.get()
+            if not base_name:
+                messagebox.showwarning("警告", "请输入基础文件名！")
+                return
+        else:
+            output_dir = None
+            base_name = None
+
+        self.status_var.set("正在去除背景（首次运行需下载模型）...")
+        self.progress.start()
+
+        def remove_thread():
+            try:
+                model = self.bg_model.get()
+                self.bg_remover.set_model(model)
+                bg_color = self._get_bg_color()
+                alpha_matting = self.bg_alpha_matting.get()
+                am_fg = self.bg_am_fg.get()
+                am_bg = self.bg_am_bg.get()
+                am_erode = self.bg_am_erode.get()
+
+                success_count = 0
+                total = len(self.bg_remove_paths)
+
+                if overwrite:
+                    # ── 覆盖模式：逐张处理，写回原路径 ──────────────────
+                    for idx, input_path in enumerate(self.bg_remove_paths):
+                        filename = os.path.basename(input_path)
+                        self.progress_queue.put((
+                            "status", f"正在处理 ({idx + 1}/{total}): {filename}",
+                        ))
+
+                        base, ext = os.path.splitext(input_path)
+                        # 透明背景必须用 PNG；有填充色可保留原格式
+                        if bg_color is None and ext.lower() not in (".png",):
+                            out_path = base + ".png"
+                        else:
+                            out_path = input_path
+
+                        # 先写到同目录临时文件（.png 让 PIL 能识别格式），成功后再替换
+                        tmp_path = base + "._bgtmp_.png"
+                        self.bg_remover.remove_background(
+                            input_path, tmp_path,
+                            bg_color=bg_color,
+                            alpha_matting=alpha_matting,
+                            alpha_matting_foreground_threshold=am_fg,
+                            alpha_matting_background_threshold=am_bg,
+                            alpha_matting_erode_size=am_erode,
+                        )
+                        # 替换原文件（tmp 已是 .png，直接 rename 到目标路径）
+                        if os.path.exists(out_path):
+                            os.remove(out_path)
+                        os.rename(tmp_path, out_path)
+                        # 若目标路径与原路径不同（扩展名改变），删除原文件
+                        if os.path.normcase(out_path) != os.path.normcase(input_path) \
+                                and os.path.exists(input_path):
+                            os.remove(input_path)
+                        success_count += 1
+
+                    self.progress_queue.put((
+                        "success",
+                        f"背景去除完成！\n成功覆盖 {success_count} 张图片（已替换源文件）",
+                    ))
+                else:
+                    # ── 普通模式：输出到指定目录 ─────────────────────────
+                    def on_progress(current, total_n, filename):
+                        self.progress_queue.put((
+                            "status", f"正在处理 ({current}/{total_n}): {filename}",
+                        ))
+
+                    output_paths = self.bg_remover.remove_background_batch(
+                        self.bg_remove_paths,
+                        output_dir,
+                        base_name=base_name,
+                        bg_color=bg_color,
+                        alpha_matting=alpha_matting,
+                        alpha_matting_foreground_threshold=am_fg,
+                        alpha_matting_background_threshold=am_bg,
+                        alpha_matting_erode_size=am_erode,
+                        progress_callback=on_progress,
+                    )
+                    self.progress_queue.put((
+                        "success",
+                        f"背景去除完成！\n成功处理 {len(output_paths)} 张图片\n输出目录: {output_dir}",
+                    ))
+
+            except ImportError as e:
+                self.progress_queue.put(("error", str(e)))
+            except Exception:
+                import traceback
+                self.progress_queue.put(("error", traceback.format_exc()))
+
+        threading.Thread(target=remove_thread, daemon=True).start()
+
     def create_rename_tab(self, parent):
         input_frame = ttk.LabelFrame(parent, text="选择图片", padding="10")
         input_frame.grid(row=0, column=0, sticky="nsew", pady=5)
