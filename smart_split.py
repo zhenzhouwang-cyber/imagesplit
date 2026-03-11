@@ -17,25 +17,19 @@ class SmartSplitDetector:
 
     def smart_split(self, image_path: str, output_dir: str, base_name: str) -> List[str]:
         print(f"[DEBUG] smart_split: {image_path}")
-
         panels = self.detect_all_panels(image_path)
         print(f"[DEBUG] Detected {len(panels)} panels")
-
         if not panels:
             return []
-
         try:
             image = Image.open(image_path)
             print(f"[DEBUG] Image size: {image.size}")
         except Exception as e:
             print(f"[ERROR] Cannot open image: {e}")
             return []
-
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir)
-
         panels.sort(key=lambda p: (p[1], p[0]))
-
         output_paths = []
         for idx, (x1, y1, x2, y2) in enumerate(panels, 1):
             try:
@@ -47,18 +41,15 @@ class SmartSplitDetector:
                 print(f"[DEBUG] Saved panel {idx}: ({x1},{y1})-({x2},{y2}), size={x2-x1}x{y2-y1}")
             except Exception as e:
                 print(f"[ERROR] Failed to save panel {idx}: {e}")
-
         image.close()
         return output_paths
 
     def detect_all_panels(self, image_path: str) -> List[Tuple[int, int, int, int]]:
-        """检测所有面板区域（内容感知，确保物体完整拆分）"""
+        """检测所有面板区域"""
         print(f"[DEBUG] detect_all_panels: {image_path}")
-
         if not os.path.exists(image_path):
             print(f"[ERROR] File not found: {image_path}")
             return []
-
         img = cv2.imread(image_path)
         if img is None:
             try:
@@ -68,99 +59,315 @@ class SmartSplitDetector:
             except Exception as e:
                 print(f"[ERROR] Cannot read image: {e}")
                 return []
-
         height, width = img.shape[:2]
         print(f"[DEBUG] Image dimensions: {width}x{height}")
-
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         bg_color = self._detect_background_color(gray)
+        print(f"[DEBUG] Background intensity: {bg_color}")
         fg_mask = self._create_foreground_mask(gray, bg_color)
 
-        # 基于前景内容找分割线
-        h_lines, v_lines = self._detect_split_lines_by_content(img, gray, bg_color, fg_mask)
+        # 主检测
+        h_lines, v_lines = self._detect_by_projection_valleys(fg_mask, width, height)
 
-        print(f"[DEBUG] Horizontal split lines: {h_lines}")
-        print(f"[DEBUG] Vertical split lines: {v_lines}")
-
-        panels = self._create_panels(h_lines, v_lines, width, height)
-        panels = self._add_overlap(panels, width, height)
-
-        # 过滤尺寸太小的面板
-        panels = [
-            p for p in panels
-            if (p[2] - p[0]) >= self.min_panel_size and (p[3] - p[1]) >= self.min_panel_size
-        ]
-
-        # ★ 过滤空白/无内容面板（解决"多余白图"问题）
-        panels = [
-            p for p in panels
-            if not self._is_blank_panel(fg_mask, p)
-        ]
-
-        if not panels:
-            panels = [(0, 0, width, height)]
-
-        return panels
-
-    # ─────────────────────────────────────────────
-    # 核心：基于前景内容的分割线检测
-    # ─────────────────────────────────────────────
-
-    def _detect_split_lines_by_content(
-        self,
-        img: np.ndarray,
-        gray: np.ndarray,
-        bg_color: int,
-        fg_mask: np.ndarray,
-    ) -> Tuple[List[int], List[int]]:
-        """
-        通过检测前景内容的空白间隔确定分割线：
-          1. 形态学膨胀（动态核）合并物体内部细小间隙
-          2. 在膨胀后的投影中找完全空白的连续区段
-          3. 验证候选线在原始前景遮罩中不穿过任何物体
-          4. 失败时回退传统空白行检测
-        """
-        height, width = gray.shape
-
-        # 动态膨胀核：图像越大核越大，但上限 20px，防止把相邻物体合并
-        dil_h = max(5, min(20, height // 80))
-        dil_v = max(5, min(20, width // 80))
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (1, dil_h * 2 + 1))
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (dil_v * 2 + 1, 1))
-
-        # 纵向膨胀 → 用于检测水平分割线
-        dilated_h = cv2.dilate(fg_mask, kernel_h)
-        # 横向膨胀 → 用于检测垂直分割线
-        dilated_v = cv2.dilate(fg_mask, kernel_v)
-
-        # 每行/每列前景像素数（膨胀后）
-        h_proj = np.sum(dilated_h > 0, axis=1).astype(float)
-        v_proj = np.sum(dilated_v > 0, axis=0).astype(float)
-
-        # ★ 修复：min_gap 基于图像尺寸动态计算
-        h_min_gap = max(8, height // 100)
-        v_min_gap = max(8, width // 100)
-
-        h_gaps = self._find_empty_gaps(h_proj, min_gap=h_min_gap)
-        v_gaps = self._find_empty_gaps(v_proj, min_gap=v_min_gap)
-
-        # 验证分割线不穿过物体
-        h_lines = self._validate_split_lines(h_gaps, fg_mask, axis='h')
-        v_lines = self._validate_split_lines(v_gaps, fg_mask, axis='v')
-
-        # 回退：内容检测无结果时用传统空白行检测
+        # 回退：连通域间隙
         if not h_lines and not v_lines:
-            print("[DEBUG] Content-based detection found no lines, falling back to whitespace detection")
+            h_lines, v_lines = self._detect_by_component_gaps(fg_mask, width, height)
+
+        # 回退：传统空白行
+        if not h_lines and not v_lines:
             h_lines, v_lines = self._detect_whitespace_lines(gray, bg_color)
 
+        print(f"[DEBUG] Split lines -> h={h_lines}, v={v_lines}")
+
+        panels = self._create_panels(h_lines, v_lines, width, height)
+
+        # ★ 水平分割后对每个宽子区递归做垂直检测（解决001类问题）
+        if h_lines and not v_lines:
+            panels = self._recursive_vsplit(fg_mask, panels, width)
+
+        panels = self._add_overlap(panels, width, height)
+        panels = [p for p in panels
+                  if (p[2]-p[0]) >= self.min_panel_size and (p[3]-p[1]) >= self.min_panel_size]
+        panels = [p for p in panels if not self._is_blank_panel(fg_mask, p)]
+        if not panels:
+            panels = [(0, 0, width, height)]
+        return panels
+
+    # ═══════════════════════════════════════════════════════
+    # 策略1：投影谷值检测
+    # ═══════════════════════════════════════════════════════
+
+    def _detect_by_projection_valleys(
+        self, fg_mask: np.ndarray, width: int, height: int
+    ) -> Tuple[List[int], List[int]]:
+        v_proj = np.sum(fg_mask > 0, axis=0).astype(np.float32)
+        h_proj = np.sum(fg_mask > 0, axis=1).astype(np.float32)
+
+        min_dist_v = max(60, width // 8)
+        min_dist_h = max(60, height // 8)
+
+        v_lines = self._find_valleys(v_proj, min_distance=min_dist_v)
+        h_lines = self._find_valleys(h_proj, min_distance=min_dist_h)
+
+        v_lines, h_lines = self._select_direction(v_proj, h_proj, v_lines, h_lines, width, height)
         return h_lines, v_lines
 
-    # ─────────────────────────────────────────────
+    def _find_valleys(
+        self,
+        projection: np.ndarray,
+        min_distance: int,
+        min_prominence_ratio: float = 0.35,
+        abs_ratio_max: float = 0.50,
+    ) -> List[int]:
+        """
+        在投影中找显著谷值。
+        过滤条件（同时满足）：
+          1. 突出度 >= max * min_prominence_ratio（谷足够深）
+          2. 谷值 / max < abs_ratio_max（谷绝对量足够低，非物体内部细颈）
+        相邻谷值合并，保留突出度更大的。
+        """
+        n = len(projection)
+        margin = max(5, int(n * 0.04))
+        sigma = max(8, n // 35)
+        ks = sigma * 6 + 1
+        if ks % 2 == 0:
+            ks += 1
+        smoothed = cv2.GaussianBlur(
+            projection.reshape(1, -1), (ks, 1), sigmaX=sigma
+        ).flatten()
+
+        max_val = float(smoothed.max())
+        if max_val < 1:
+            return []
+
+        candidates: List[Tuple[int, float]] = []
+        for i in range(1, n - 1):
+            if smoothed[i] < smoothed[i - 1] and smoothed[i] < smoothed[i + 1]:
+                if not (margin < i < n - margin):
+                    continue
+                left_peak = float(smoothed[:i].max())
+                right_peak = float(smoothed[i + 1:].max())
+                prominence = min(left_peak - smoothed[i], right_peak - smoothed[i])
+                abs_ratio = smoothed[i] / max_val
+                # 同时检查突出度和绝对量
+                if (prominence >= max_val * min_prominence_ratio
+                        and abs_ratio < abs_ratio_max):
+                    candidates.append((i, prominence))
+
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda x: x[0])
+        merged: List[Tuple[int, float]] = [candidates[0]]
+        for pos, prom in candidates[1:]:
+            if pos - merged[-1][0] >= min_distance:
+                merged.append((pos, prom))
+            elif prom > merged[-1][1]:
+                merged[-1] = (pos, prom)
+
+        result = [pos for pos, _ in merged]
+        print(f"[DEBUG] Valley candidates: {result}")
+        return result
+
+    def _select_direction(
+        self,
+        v_proj: np.ndarray, h_proj: np.ndarray,
+        v_lines: List[int], h_lines: List[int],
+        width: int, height: int,
+    ) -> Tuple[List[int], List[int]]:
+        """
+        方向选择策略：
+          1. 只有一个方向有谷值：直接用该方向
+          2. 两个方向都有谷值：
+             a. 数量不等 → 选数量多的
+             b. 数量相等 → 若两者平均突出度均 >= 40%，允许网格分割
+             c. 数量相等 → 其他情况选更深的；平均深度相差 < 5% 时宽图偏V
+        """
+        if not v_lines and not h_lines:
+            return [], []
+        if v_lines and not h_lines:
+            return v_lines, []
+        if h_lines and not v_lines:
+            return [], h_lines
+
+        # 两方向都有谷值
+        vc, hc = len(v_lines), len(h_lines)
+        if vc > hc:
+            print(f"[DEBUG] Direction: V wins by count ({vc} vs {hc})")
+            return v_lines, []
+        if hc > vc:
+            print(f"[DEBUG] Direction: H wins by count ({hc} vs {vc})")
+            return [], h_lines
+
+        # 数量相等，计算平均突出度
+        v_depth = self._avg_depth(v_proj, v_lines)
+        h_depth = self._avg_depth(h_proj, h_lines)
+
+        # 两方向均显著 → 允许网格（解决010类问题）
+        if v_depth >= 0.40 and h_depth >= 0.40:
+            print(f"[DEBUG] Direction: GRID allowed (v_depth={v_depth:.2f}, h_depth={h_depth:.2f})")
+            return v_lines, h_lines
+
+        # 选更深的
+        diff = abs(v_depth - h_depth)
+        if diff < 0.05 and width / height > 1.5:
+            # 宽图且深度接近 → 偏向V（物体并排更常见）
+            print(f"[DEBUG] Direction: V preferred (wide image, similar depth)")
+            return v_lines, []
+        if v_depth >= h_depth:
+            print(f"[DEBUG] Direction: V wins by depth ({v_depth:.2f} vs {h_depth:.2f})")
+            return v_lines, []
+        else:
+            print(f"[DEBUG] Direction: H wins by depth ({h_depth:.2f} vs {v_depth:.2f})")
+            return [], h_lines
+
+    def _avg_depth(self, projection: np.ndarray, positions: List[int]) -> float:
+        """计算一组谷值的平均突出度比例"""
+        if not positions:
+            return 0.0
+        max_val = float(projection.max())
+        if max_val == 0:
+            return 0.0
+        depths = []
+        for pos in positions:
+            lp = float(projection[:pos].max()) if pos > 0 else 0.0
+            rp = float(projection[pos+1:].max()) if pos < len(projection)-1 else 0.0
+            depths.append(min(lp, rp) - float(projection[pos]))
+        return sum(depths) / len(depths) / max_val
+
+    # ═══════════════════════════════════════════════════════
+    # ★ 递归竖向分割（解决 001 类：水平分割后各行再竖向分割）
+    # ═══════════════════════════════════════════════════════
+
+    def _recursive_vsplit(
+        self,
+        fg_mask: np.ndarray,
+        panels: List[Tuple[int, int, int, int]],
+        total_width: int,
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        对每个宽度远大于高度的子面板，独立运行竖向谷值检测。
+        用于处理"先水平分割，各行再各自竖向分割"的布局。
+        """
+        new_panels = []
+        for (x1, y1, x2, y2) in panels:
+            pw = x2 - x1
+            ph = y2 - y1
+            if ph == 0:
+                new_panels.append((x1, y1, x2, y2))
+                continue
+            # 只对宽高比 > 1.2 的子面板尝试竖向分割
+            if pw / ph > 1.2:
+                sub_fg = fg_mask[y1:y2, x1:x2]
+                v_proj = np.sum(sub_fg > 0, axis=0).astype(np.float32)
+                min_dist = max(60, pw // 8)
+                v_sub = self._find_valleys(v_proj, min_distance=min_dist)
+                if v_sub:
+                    print(f"[DEBUG] Recursive vsplit for ({x1},{y1})-({x2},{y2}): {v_sub}")
+                    x_pos = [x1] + [x1 + vl for vl in v_sub] + [x2]
+                    for i in range(len(x_pos) - 1):
+                        new_panels.append((x_pos[i], y1, x_pos[i+1], y2))
+                    continue
+            new_panels.append((x1, y1, x2, y2))
+        return new_panels
+
+    # ═══════════════════════════════════════════════════════
+    # 策略2：连通域间隙法
+    # ═══════════════════════════════════════════════════════
+
+    def _detect_by_component_gaps(
+        self, fg_mask: np.ndarray, width: int, height: int
+    ) -> Tuple[List[int], List[int]]:
+        close_px = max(8, min(width, height) // 60)
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (close_px * 2 + 1, close_px * 2 + 1)
+        )
+        closed = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+        min_area = width * height * 0.003
+        bboxes = []
+        for i in range(1, num_labels):
+            if int(stats[i, cv2.CC_STAT_AREA]) >= min_area:
+                x1 = int(stats[i, cv2.CC_STAT_LEFT])
+                y1 = int(stats[i, cv2.CC_STAT_TOP])
+                w = int(stats[i, cv2.CC_STAT_WIDTH])
+                h = int(stats[i, cv2.CC_STAT_HEIGHT])
+                bboxes.append((x1, y1, x1 + w, y1 + h))
+        if len(bboxes) <= 1:
+            return [], []
+        v_lines = self._gaps_from_ranges(
+            [b[0] for b in bboxes], [b[2] for b in bboxes], total=width
+        )
+        h_lines = self._gaps_from_ranges(
+            [b[1] for b in bboxes], [b[3] for b in bboxes], total=height
+        )
+        return h_lines, v_lines
+
+    def _gaps_from_ranges(
+        self, starts: List[int], ends: List[int], total: int, min_gap: int = 5
+    ) -> List[int]:
+        margin = max(3, int(total * 0.03))
+        ranges = sorted(zip(starts, ends), key=lambda r: r[0])
+        merged: List[Tuple[int, int]] = []
+        for s, e in ranges:
+            if merged and s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        gaps = []
+        for i in range(len(merged) - 1):
+            gap_start = merged[i][1]
+            gap_end = merged[i + 1][0]
+            gap_len = gap_end - gap_start
+            mid = gap_start + gap_len // 2
+            if gap_len >= min_gap and margin < mid < total - margin:
+                gaps.append(mid)
+        return gaps
+
+    # ═══════════════════════════════════════════════════════
+    # 策略3：传统空白行法（兜底）
+    # ═══════════════════════════════════════════════════════
+
+    def _detect_whitespace_lines(
+        self, gray: np.ndarray, bg_color: int
+    ) -> Tuple[List[int], List[int]]:
+        height, width = gray.shape
+        diff = np.abs(gray.astype(np.int32) - bg_color)
+        near_bg = np.where(diff <= 20, np.uint8(255), np.uint8(0))
+        h_proj = np.sum(near_bg, axis=1).astype(float)
+        v_proj = np.sum(near_bg, axis=0).astype(float)
+        h_lines = self._find_continuous_gaps_threshold(h_proj, width * 255 * 0.95, height)
+        v_lines = self._find_continuous_gaps_threshold(v_proj, height * 255 * 0.95, width)
+        return h_lines, v_lines
+
+    def _find_continuous_gaps_threshold(
+        self, projection: np.ndarray, threshold: float, total_length: int,
+        min_continuous: int = 15
+    ) -> List[int]:
+        margin = max(5, int(total_length * 0.05))
+        gaps, in_gap, gap_start = [], False, 0
+        for i, val in enumerate(projection):
+            if val >= threshold:
+                if not in_gap:
+                    in_gap, gap_start = True, i
+            elif in_gap:
+                gap_len = i - gap_start
+                mid = gap_start + gap_len // 2
+                if gap_len >= min_continuous and margin < mid < total_length - margin:
+                    gaps.append(mid)
+                in_gap = False
+        if in_gap:
+            gap_len = total_length - gap_start
+            mid = gap_start + gap_len // 2
+            if gap_len >= min_continuous and margin < mid < total_length - margin:
+                gaps.append(mid)
+        return gaps
+
+    # ═══════════════════════════════════════════════════════
     # 背景检测 & 前景遮罩
-    # ─────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════
 
     def _detect_background_color(self, gray: np.ndarray) -> int:
-        """取图像四边框像素中位数作为背景亮度，自动适配白/黑/彩色背景"""
         h, w = gray.shape
         border_size = max(10, min(h, w) // 20)
         border_pixels = np.concatenate([
@@ -171,272 +378,103 @@ class SmartSplitDetector:
         ])
         return int(np.median(border_pixels))
 
-    def _create_foreground_mask(self, gray: np.ndarray, bg_color: int, tolerance: int = 15) -> np.ndarray:
-        """像素与背景色之差 > tolerance 的为前景（支持浅色/深色背景）"""
-        diff = np.abs(gray.astype(np.int32) - bg_color)
-        return np.where(diff > tolerance, np.uint8(255), np.uint8(0))
+    def _create_foreground_mask(
+        self, gray: np.ndarray, bg_color: int, tolerance: int = 15
+    ) -> np.ndarray:
+        """全局差值 + 局部对比度（大核高斯），取最大，对渐变背景鲁棒"""
+        h, w = gray.shape
+        diff_global = np.abs(gray.astype(np.int32) - bg_color).astype(np.uint8)
+        blur_size = max(51, min(h, w) // 8)
+        if blur_size % 2 == 0:
+            blur_size += 1
+        local_bg = cv2.GaussianBlur(gray.astype(np.float32), (blur_size, blur_size), 0)
+        diff_local = np.abs(gray.astype(np.float32) - local_bg).clip(0, 255).astype(np.uint8)
+        combined = np.maximum(diff_global, diff_local)
+        mask = np.where(combined > tolerance, np.uint8(255), np.uint8(0))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        return mask
 
-    # ─────────────────────────────────────────────
-    # 间隔检测
-    # ─────────────────────────────────────────────
-
-    def _find_empty_gaps(self, projection: np.ndarray, min_gap: int = 8) -> List[int]:
-        """
-        在投影数组中找连续空白区段，返回各段中点位置。
-        - 允许微量噪点（≤ 0.5% 宽度的前景像素视为空白）
-        - 排除头尾 5% 的边缘，避免把图像边框误判为分割线
-        ★ 修复：边距基于投影自身长度计算，不依赖外部 total 参数
-        """
-        n = len(projection)
-        margin = max(5, int(n * 0.05))
-        # 噪点容忍：该行/列最多允许 0.5% 的像素为前景仍视为空白
-        noise_tol = max(1, int(n * 0.005))
-
-        gaps = []
-        in_gap = False
-        gap_start = 0
-
-        for i, val in enumerate(projection):
-            if val <= noise_tol:
-                if not in_gap:
-                    in_gap = True
-                    gap_start = i
-            else:
-                if in_gap:
-                    gap_len = i - gap_start
-                    mid = gap_start + gap_len // 2
-                    if gap_len >= min_gap and margin < mid < n - margin:
-                        gaps.append(mid)
-                    in_gap = False
-
-        # 末尾收尾
-        if in_gap:
-            gap_len = n - gap_start
-            mid = gap_start + gap_len // 2
-            if gap_len >= min_gap and margin < mid < n - margin:
-                gaps.append(mid)
-
-        return gaps
-
-    def _validate_split_lines(
-        self,
-        candidates: List[int],
-        fg_mask: np.ndarray,
-        axis: str,
-    ) -> List[int]:
-        """
-        验证候选分割线在原始前景遮罩中没有前景像素（不切断物体）。
-        若命中物体，则在 ±8px 范围内寻找最近的空白行/列。
-        """
-        valid = []
-        for pos in candidates:
-            if axis == 'h':
-                line = fg_mask[pos, :]
-                if np.sum(line > 0) == 0:
-                    valid.append(pos)
-                else:
-                    found = self._find_nearest_empty_line(fg_mask, pos, search=8, axis='h')
-                    if found is not None:
-                        valid.append(found)
-            else:
-                line = fg_mask[:, pos]
-                if np.sum(line > 0) == 0:
-                    valid.append(pos)
-                else:
-                    found = self._find_nearest_empty_line(fg_mask, pos, search=8, axis='v')
-                    if found is not None:
-                        valid.append(found)
-        return valid
-
-    def _find_nearest_empty_line(
-        self,
-        fg_mask: np.ndarray,
-        pos: int,
-        search: int,
-        axis: str,
-    ) -> Optional[int]:
-        """在 pos ± search 范围内找前景像素为 0 的最近行/列"""
-        h, w = fg_mask.shape
-        limit = h if axis == 'h' else w
-        for delta in range(search + 1):
-            for sign in ([0] if delta == 0 else [1, -1]):
-                p = pos + sign * delta
-                if p < 0 or p >= limit:
-                    continue
-                line = fg_mask[p, :] if axis == 'h' else fg_mask[:, p]
-                if np.sum(line > 0) == 0:
-                    return p
-        return None
-
-    # ─────────────────────────────────────────────
-    # ★ 新增：空白面板过滤
-    # ─────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # 空白面板过滤
+    # ═══════════════════════════════════════════════════════
 
     def _is_blank_panel(
-        self,
-        fg_mask: np.ndarray,
-        panel: Tuple[int, int, int, int],
+        self, fg_mask: np.ndarray, panel: Tuple[int, int, int, int],
         min_content_ratio: float = 0.005,
     ) -> bool:
-        """
-        检测面板区域是否几乎没有内容（全白/全背景色）。
-        min_content_ratio: 前景像素占比低于此值视为空白面板，默认 0.5%。
-        """
         x1, y1, x2, y2 = panel
         region = fg_mask[y1:y2, x1:x2]
         if region.size == 0:
             return True
-        fg_count = int(np.sum(region > 0))
-        total = region.shape[0] * region.shape[1]
-        ratio = fg_count / total
+        ratio = float(np.sum(region > 0)) / (region.shape[0] * region.shape[1])
         print(f"[DEBUG] Panel ({x1},{y1})-({x2},{y2}) content ratio: {ratio:.3f}")
         return ratio < min_content_ratio
 
-    # ─────────────────────────────────────────────
-    # 回退方法：传统空白行检测
-    # ─────────────────────────────────────────────
-
-    def _detect_whitespace_lines(
-        self, gray: np.ndarray, bg_color: int
-    ) -> Tuple[List[int], List[int]]:
-        """回退方案：检测接近背景色的连续空白行/列（支持任意背景色）"""
-        height, width = gray.shape
-        tolerance = 20
-        diff = np.abs(gray.astype(np.int32) - bg_color)
-        near_bg = np.where(diff <= tolerance, np.uint8(255), np.uint8(0))
-
-        h_proj = np.sum(near_bg, axis=1).astype(float)
-        h_threshold = width * 255 * 0.95
-        h_lines = self._find_continuous_gaps_threshold(h_proj, h_threshold, height, min_continuous=15)
-
-        v_proj = np.sum(near_bg, axis=0).astype(float)
-        v_threshold = height * 255 * 0.95
-        v_lines = self._find_continuous_gaps_threshold(v_proj, v_threshold, width, min_continuous=15)
-
-        return h_lines, v_lines
-
-    def _find_continuous_gaps_threshold(
-        self,
-        projection: np.ndarray,
-        threshold: float,
-        total_length: int,
-        min_continuous: int = 15,
-    ) -> List[int]:
-        """找连续满足阈值的区域，返回中点（用于回退方案）"""
-        margin = max(5, int(total_length * 0.05))
-        gaps = []
-        in_gap = False
-        gap_start = 0
-
-        for i, val in enumerate(projection):
-            if val >= threshold:
-                if not in_gap:
-                    in_gap = True
-                    gap_start = i
-            else:
-                if in_gap:
-                    gap_len = i - gap_start
-                    mid = gap_start + gap_len // 2
-                    if gap_len >= min_continuous and margin < mid < total_length - margin:
-                        gaps.append(mid)
-                    in_gap = False
-
-        if in_gap:
-            gap_len = total_length - gap_start
-            mid = gap_start + gap_len // 2
-            if gap_len >= min_continuous and margin < mid < total_length - margin:
-                gaps.append(mid)
-
-        return gaps
-
-    # ─────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════
     # 面板创建与重叠
-    # ─────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════
 
     def _create_panels(
-        self,
-        h_lines: List[int],
-        v_lines: List[int],
-        width: int,
-        height: int,
+        self, h_lines: List[int], v_lines: List[int], width: int, height: int
     ) -> List[Tuple[int, int, int, int]]:
-        """根据分割线创建面板边界框"""
         if not h_lines and not v_lines:
             return [(0, 0, width, height)]
-
         if v_lines and not h_lines:
-            x_positions = [0] + sorted(v_lines) + [width]
-            return [(x_positions[i], 0, x_positions[i + 1], height)
-                    for i in range(len(x_positions) - 1)]
-
+            x_pos = [0] + sorted(v_lines) + [width]
+            return [(x_pos[i], 0, x_pos[i+1], height) for i in range(len(x_pos)-1)]
         if h_lines and not v_lines:
-            y_positions = [0] + sorted(h_lines) + [height]
-            return [(0, y_positions[i], width, y_positions[i + 1])
-                    for i in range(len(y_positions) - 1)]
-
-        # 网格分割
-        x_positions = [0] + sorted(v_lines) + [width]
-        y_positions = [0] + sorted(h_lines) + [height]
-        panels = []
-        for yi in range(len(y_positions) - 1):
-            for xi in range(len(x_positions) - 1):
-                panels.append((
-                    x_positions[xi],
-                    y_positions[yi],
-                    x_positions[xi + 1],
-                    y_positions[yi + 1],
-                ))
-        return panels
+            y_pos = [0] + sorted(h_lines) + [height]
+            return [(0, y_pos[i], width, y_pos[i+1]) for i in range(len(y_pos)-1)]
+        x_pos = [0] + sorted(v_lines) + [width]
+        y_pos = [0] + sorted(h_lines) + [height]
+        return [
+            (x_pos[xi], y_pos[yi], x_pos[xi+1], y_pos[yi+1])
+            for yi in range(len(y_pos)-1)
+            for xi in range(len(x_pos)-1)
+        ]
 
     def _add_overlap(
-        self,
-        panels: List[Tuple[int, int, int, int]],
-        width: int,
-        height: int,
+        self, panels: List[Tuple[int, int, int, int]], width: int, height: int
     ) -> List[Tuple[int, int, int, int]]:
-        """为相邻面板添加重叠边距，防止边缘内容被裁切"""
         if len(panels) <= 1:
             return panels
-
         y_starts = [p[1] for p in panels]
         x_starts = [p[0] for p in panels]
         y_same = (max(y_starts) - min(y_starts)) < self.min_panel_size
         x_same = (max(x_starts) - min(x_starts)) < self.min_panel_size
-
         overlapped = []
-
         if y_same and not x_same:
-            # 水平排列
             panels = sorted(panels, key=lambda p: p[0])
             for i, (x1, y1, x2, y2) in enumerate(panels):
-                new_x1 = max(0, x1 - self.overlap_margin) if i > 0 else x1
-                new_x2 = min(width, x2 + self.overlap_margin) if i < len(panels) - 1 else x2
-                overlapped.append((new_x1, y1, new_x2, y2))
-
+                overlapped.append((
+                    max(0, x1-self.overlap_margin) if i > 0 else x1,
+                    y1,
+                    min(width, x2+self.overlap_margin) if i < len(panels)-1 else x2,
+                    y2,
+                ))
         elif x_same and not y_same:
-            # 垂直排列
             panels = sorted(panels, key=lambda p: p[1])
             for i, (x1, y1, x2, y2) in enumerate(panels):
-                new_y1 = max(0, y1 - self.overlap_margin) if i > 0 else y1
-                new_y2 = min(height, y2 + self.overlap_margin) if i < len(panels) - 1 else y2
-                overlapped.append((x1, new_y1, x2, new_y2))
-
-        else:
-            # 网格排列：各方向均加重叠
-            panels = sorted(panels, key=lambda p: (p[1], p[0]))
-            for x1, y1, x2, y2 in panels:
                 overlapped.append((
-                    max(0, x1 - self.overlap_margin),
-                    max(0, y1 - self.overlap_margin),
-                    min(width, x2 + self.overlap_margin),
-                    min(height, y2 + self.overlap_margin),
+                    x1,
+                    max(0, y1-self.overlap_margin) if i > 0 else y1,
+                    x2,
+                    min(height, y2+self.overlap_margin) if i < len(panels)-1 else y2,
                 ))
-
+        else:
+            for x1, y1, x2, y2 in sorted(panels, key=lambda p: (p[1], p[0])):
+                overlapped.append((
+                    max(0, x1-self.overlap_margin),
+                    max(0, y1-self.overlap_margin),
+                    min(width, x2+self.overlap_margin),
+                    min(height, y2+self.overlap_margin),
+                ))
         return overlapped
 
-    # ─────────────────────────────────────────────
-    # 对外辅助接口（保持向后兼容）
-    # ─────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # 对外辅助接口（向后兼容）
+    # ═══════════════════════════════════════════════════════
 
     def detect_split_lines(
         self, image_path: str, min_gap: int = 20
@@ -444,12 +482,11 @@ class SmartSplitDetector:
         img = cv2.imread(image_path)
         if img is None:
             return [], [], "horizontal"
-
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         bg_color = self._detect_background_color(gray)
         fg_mask = self._create_foreground_mask(gray, bg_color)
-        h_lines, v_lines = self._detect_split_lines_by_content(img, gray, bg_color, fg_mask)
-
+        height, width = gray.shape
+        h_lines, v_lines = self._detect_by_projection_valleys(fg_mask, width, height)
         mode = "horizontal" if len(v_lines) >= len(h_lines) else "vertical"
         return h_lines, v_lines, mode
 
