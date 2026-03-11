@@ -81,16 +81,19 @@ class SmartSplitDetector:
 
         panels = self._create_panels(h_lines, v_lines, width, height)
 
-        # ★ 水平分割后对每个宽子区递归做垂直检测（解决001类问题）
-        if h_lines and not v_lines:
+        # ★ 分层递归：H切后对每行做V检测（宽松阈值），V切后对每列做H检测
+        if h_lines:
             panels = self._recursive_vsplit(fg_mask, panels, width)
+        if v_lines:
+            panels = self._recursive_hsplit(fg_mask, panels, height)
 
-        panels = self._add_overlap(panels, width, height)
+        # 先过滤空白/过小面板（overlap 前，避免 overlap 将空白面板扩展到有内容区域）
         panels = [p for p in panels
                   if (p[2]-p[0]) >= self.min_panel_size and (p[3]-p[1]) >= self.min_panel_size]
         panels = [p for p in panels if not self._is_blank_panel(fg_mask, p)]
         if not panels:
             panels = [(0, 0, width, height)]
+        panels = self._add_overlap(panels, width, height)
         return panels
 
     # ═══════════════════════════════════════════════════════
@@ -103,8 +106,8 @@ class SmartSplitDetector:
         v_proj = np.sum(fg_mask > 0, axis=0).astype(np.float32)
         h_proj = np.sum(fg_mask > 0, axis=1).astype(np.float32)
 
-        min_dist_v = max(60, width // 8)
-        min_dist_h = max(60, height // 8)
+        min_dist_v = max(80, width // 7)
+        min_dist_h = max(80, height // 7)
 
         v_lines = self._find_valleys(v_proj, min_distance=min_dist_v)
         h_lines = self._find_valleys(h_proj, min_distance=min_dist_h)
@@ -190,7 +193,7 @@ class SmartSplitDetector:
         if h_lines and not v_lines:
             return [], h_lines
 
-        # 两方向都有谷值
+        # 两方向都有谷值：选主方向，另一方向由递归处理
         vc, hc = len(v_lines), len(h_lines)
         if vc > hc:
             print(f"[DEBUG] Direction: V wins by count ({vc} vs {hc})")
@@ -199,26 +202,12 @@ class SmartSplitDetector:
             print(f"[DEBUG] Direction: H wins by count ({hc} vs {vc})")
             return [], h_lines
 
-        # 数量相等，计算平均突出度
-        v_depth = self._avg_depth(v_proj, v_lines)
-        h_depth = self._avg_depth(h_proj, h_lines)
-
-        # 两方向均显著 → 允许网格（解决010类问题）
-        if v_depth >= 0.40 and h_depth >= 0.40:
-            print(f"[DEBUG] Direction: GRID allowed (v_depth={v_depth:.2f}, h_depth={h_depth:.2f})")
-            return v_lines, h_lines
-
-        # 选更深的
-        diff = abs(v_depth - h_depth)
-        if diff < 0.05 and width / height > 1.5:
-            # 宽图且深度接近 → 偏向V（物体并排更常见）
-            print(f"[DEBUG] Direction: V preferred (wide image, similar depth)")
-            return v_lines, []
-        if v_depth >= h_depth:
-            print(f"[DEBUG] Direction: V wins by depth ({v_depth:.2f} vs {h_depth:.2f})")
+        # 数量相等：宽图优先V（物体横排），高图优先H
+        if width >= height:
+            print(f"[DEBUG] Direction: V preferred (wide image AR={width/height:.2f})")
             return v_lines, []
         else:
-            print(f"[DEBUG] Direction: H wins by depth ({h_depth:.2f} vs {v_depth:.2f})")
+            print(f"[DEBUG] Direction: H preferred (tall image AR={width/height:.2f})")
             return [], h_lines
 
     def _avg_depth(self, projection: np.ndarray, positions: List[int]) -> float:
@@ -246,8 +235,8 @@ class SmartSplitDetector:
         total_width: int,
     ) -> List[Tuple[int, int, int, int]]:
         """
-        对每个宽度远大于高度的子面板，独立运行竖向谷值检测。
-        用于处理"先水平分割，各行再各自竖向分割"的布局。
+        对H切分后的每个行条，独立运行竖向谷值检测。
+        使用宽松阈值（prom≥20%, abs<80%）以处理物体紧密排列的布局（如001）。
         """
         new_panels = []
         for (x1, y1, x2, y2) in panels:
@@ -256,18 +245,54 @@ class SmartSplitDetector:
             if ph == 0:
                 new_panels.append((x1, y1, x2, y2))
                 continue
-            # 只对宽高比 > 1.2 的子面板尝试竖向分割
-            if pw / ph > 1.2:
-                sub_fg = fg_mask[y1:y2, x1:x2]
-                v_proj = np.sum(sub_fg > 0, axis=0).astype(np.float32)
-                min_dist = max(60, pw // 8)
-                v_sub = self._find_valleys(v_proj, min_distance=min_dist)
-                if v_sub:
-                    print(f"[DEBUG] Recursive vsplit for ({x1},{y1})-({x2},{y2}): {v_sub}")
-                    x_pos = [x1] + [x1 + vl for vl in v_sub] + [x2]
-                    for i in range(len(x_pos) - 1):
-                        new_panels.append((x_pos[i], y1, x_pos[i+1], y2))
-                    continue
+            sub_fg = fg_mask[y1:y2, x1:x2]
+            v_proj = np.sum(sub_fg > 0, axis=0).astype(np.float32)
+            min_dist = max(60, pw // 8)
+            # 宽松阈值：允许物体密集排列时的浅谷
+            v_sub = self._find_valleys(
+                v_proj, min_distance=min_dist,
+                min_prominence_ratio=0.20, abs_ratio_max=0.80
+            )
+            if v_sub:
+                print(f"[DEBUG] Recursive vsplit for ({x1},{y1})-({x2},{y2}): {v_sub}")
+                x_pos = [x1] + [x1 + vl for vl in v_sub] + [x2]
+                for i in range(len(x_pos) - 1):
+                    new_panels.append((x_pos[i], y1, x_pos[i+1], y2))
+                continue
+            new_panels.append((x1, y1, x2, y2))
+        return new_panels
+
+    def _recursive_hsplit(
+        self,
+        fg_mask: np.ndarray,
+        panels: List[Tuple[int, int, int, int]],
+        total_height: int,
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        对V切分后的每个列条，独立运行横向谷值检测。
+        用于处理"先垂直分割，各列再独立横向分割"的布局（如010）。
+        """
+        new_panels = []
+        for (x1, y1, x2, y2) in panels:
+            pw = x2 - x1
+            ph = y2 - y1
+            if pw == 0:
+                new_panels.append((x1, y1, x2, y2))
+                continue
+            sub_fg = fg_mask[y1:y2, x1:x2]
+            h_proj = np.sum(sub_fg > 0, axis=1).astype(np.float32)
+            min_dist = max(60, ph // 8)
+            # 严格阈值：只在行完全/近乎空白处切（abs<15%），防止在物体腰部误切
+            h_sub = self._find_valleys(
+                h_proj, min_distance=min_dist,
+                min_prominence_ratio=0.35, abs_ratio_max=0.15
+            )
+            if h_sub:
+                print(f"[DEBUG] Recursive hsplit for ({x1},{y1})-({x2},{y2}): {h_sub}")
+                y_pos = [y1] + [y1 + hl for hl in h_sub] + [y2]
+                for i in range(len(y_pos) - 1):
+                    new_panels.append((x1, y_pos[i], x2, y_pos[i+1]))
+                continue
             new_panels.append((x1, y1, x2, y2))
         return new_panels
 
