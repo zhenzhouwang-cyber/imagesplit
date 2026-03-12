@@ -5,6 +5,7 @@ import os
 import threading
 from typing import List
 import queue
+import numpy as np
 
 from image_similarity import ImageSimilarityDetector
 from image_stitch import stitch_images_horizontal, stitch_images_vertical, stitch_images_grid
@@ -12,23 +13,29 @@ from image_split import split_image_horizontal, split_image_vertical, split_imag
 from smart_split import SmartSplitDetector
 from text_remover import TextRemover
 from background_remover import BackgroundRemover
+from subject_segmenter import SubjectSegmenter, SimpleSegmenter
+from object_remover import ObjectRemover, SimpleObjectRemover
 
 
 class ImageToolGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("图像工具箱 v6.0")
-        self.root.geometry("950x850")
+        self.root.title("图像工具箱 v7.0")
+        self.root.geometry("980x900")
         
         self.detector = None
         self.smart_detector = SmartSplitDetector()
         self.text_remover = TextRemover()
         self.bg_remover = BackgroundRemover()
+        self.subject_segmenter = None  # 延迟加载
+        self.object_remover = None     # 延迟加载
         self.image_paths = []
         self.split_batch_paths = []
         self.text_remove_paths = []
         self.bg_remove_paths = []
         self.rename_paths = []
+        self.subject_paths = []
+        self.object_paths = []
         self.stitched_images = []
         
         self.progress_queue = queue.Queue()
@@ -50,18 +57,24 @@ class ImageToolGUI:
         split_frame = ttk.Frame(notebook, padding="10")
         text_frame = ttk.Frame(notebook, padding="10")
         bg_frame = ttk.Frame(notebook, padding="10")
+        subject_frame = ttk.Frame(notebook, padding="10")
+        object_frame = ttk.Frame(notebook, padding="10")
         rename_frame = ttk.Frame(notebook, padding="10")
 
         notebook.add(stitch_frame, text="图像拼接")
         notebook.add(split_frame, text="图像拆分")
         notebook.add(text_frame, text="文字去除")
         notebook.add(bg_frame, text="背景去除")
+        notebook.add(subject_frame, text="主体识别")
+        notebook.add(object_frame, text="杂物去除")
         notebook.add(rename_frame, text="批量重命名")
 
         self.create_stitch_tab(stitch_frame)
         self.create_split_tab(split_frame)
         self.create_text_remove_tab(text_frame)
         self.create_bg_remove_tab(bg_frame)
+        self.create_subject_tab(subject_frame)
+        self.create_object_tab(object_frame)
         self.create_rename_tab(rename_frame)
         
         self.status_var = tk.StringVar(value="就绪")
@@ -1275,6 +1288,451 @@ class ImageToolGUI:
         else:
             messagebox.showinfo("成功", f"重命名完成！\n成功处理 {success_count} 个文件")
             self.clear_rename_images()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 主体识别功能
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    def create_subject_tab(self, parent):
+        # ── 输入图片 ──────────────────────────────────────────────────────
+        input_frame = ttk.LabelFrame(parent, text="输入图片", padding="10")
+        input_frame.grid(row=0, column=0, sticky="nsew", pady=5)
+
+        btn_frame = ttk.Frame(input_frame)
+        btn_frame.grid(row=0, column=0, columnspan=2, pady=5)
+
+        ttk.Button(btn_frame, text="选择单张图片",
+                   command=self.select_subject_image).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_frame, text="批量选择图片",
+                   command=self.select_batch_subject_images).grid(row=0, column=1, padx=5)
+        ttk.Button(btn_frame, text="清空列表",
+                   command=self.clear_subject_images).grid(row=0, column=2, padx=5)
+
+        list_frame = ttk.Frame(input_frame)
+        list_frame.grid(row=1, column=0, columnspan=2, pady=5, sticky="nsew")
+
+        self.subject_listbox = tk.Listbox(list_frame, height=5, selectmode=tk.EXTENDED)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.subject_listbox.yview)
+        self.subject_listbox.configure(yscrollcommand=scrollbar.set)
+        self.subject_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        # ── 识别选项 ──────────────────────────────────────────────────────
+        options_frame = ttk.LabelFrame(parent, text="识别选项", padding="10")
+        options_frame.grid(row=1, column=0, sticky="ew", pady=5)
+
+        ttk.Label(options_frame, text="输出类型:").grid(row=0, column=0, sticky=tk.W)
+        self.subject_output_type = tk.StringVar(value="transparent")
+        output_combo = ttk.Combobox(
+            options_frame, textvariable=self.subject_output_type,
+            values=["transparent", "mask", "highlight"],
+            state="readonly", width=15,
+        )
+        output_combo.grid(row=0, column=1, padx=5)
+        ttk.Label(options_frame,
+                  text="transparent=透明背景 | mask=黑白蒙版 | highlight=高亮显示").grid(
+            row=0, column=2, padx=5, sticky=tk.W)
+
+        ttk.Label(options_frame, text="识别方法:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.subject_method = tk.StringVar(value="auto")
+        method_combo = ttk.Combobox(
+            options_frame, textvariable=self.subject_method,
+            values=["auto", "sam2", "rembg"],
+            state="readonly", width=15,
+        )
+        method_combo.grid(row=1, column=1, padx=5, pady=(10, 0), sticky=tk.W)
+        ttk.Label(options_frame, text="auto=自动选择 | sam2=高精度(需模型) | rembg=快速").grid(
+            row=1, column=2, padx=5, pady=(10, 0), sticky=tk.W)
+
+        # ── 输出设置 ──────────────────────────────────────────────────────
+        output_frame = ttk.LabelFrame(parent, text="输出设置", padding="10")
+        output_frame.grid(row=2, column=0, sticky="ew", pady=5)
+
+        ttk.Label(output_frame, text="输出目录:").grid(row=0, column=0, sticky=tk.W)
+        self.subject_output_dir = tk.StringVar()
+        ttk.Entry(output_frame, textvariable=self.subject_output_dir, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(output_frame, text="浏览", command=self.browse_subject_output_dir).grid(row=0, column=2)
+
+        ttk.Label(output_frame, text="基础文件名:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.subject_base_name = tk.StringVar(value="subject")
+        ttk.Entry(output_frame, textvariable=self.subject_base_name, width=50).grid(row=1, column=1, padx=5, pady=(10, 0))
+
+        # ── 按钮 ──────────────────────────────────────────────────────────
+        btn_frame2 = ttk.Frame(parent)
+        btn_frame2.grid(row=3, column=0, pady=20)
+
+        ttk.Button(btn_frame2, text="预览识别效果",
+                   command=self.preview_subject).grid(row=0, column=0, padx=10)
+        ttk.Button(btn_frame2, text="开始识别主体",
+                   command=self.start_subject_segment).grid(row=0, column=1, padx=10)
+
+    def select_subject_image(self):
+        file = filedialog.askopenfilename(
+            title="选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp"), ("所有文件", "*.*")],
+        )
+        if file:
+            self.subject_paths = [file]
+            self.subject_listbox.delete(0, tk.END)
+            self.subject_listbox.insert(tk.END, os.path.basename(file))
+
+    def select_batch_subject_images(self):
+        files = filedialog.askopenfilenames(
+            title="批量选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp"), ("所有文件", "*.*")],
+        )
+        if files:
+            self.subject_paths = list(files)
+            self.subject_listbox.delete(0, tk.END)
+            for f in files:
+                self.subject_listbox.insert(tk.END, os.path.basename(f))
+
+    def clear_subject_images(self):
+        self.subject_paths.clear()
+        self.subject_listbox.delete(0, tk.END)
+
+    def browse_subject_output_dir(self):
+        directory = filedialog.askdirectory(title="选择输出目录")
+        if directory:
+            self.subject_output_dir.set(directory)
+
+    def _get_subject_segmenter(self):
+        """获取主体分割器"""
+        if self.subject_segmenter is None:
+            try:
+                self.subject_segmenter = SubjectSegmenter()
+            except Exception as e:
+                print(f"[GUI] Failed to load SAM2, using fallback: {e}")
+                self.subject_segmenter = SimpleSegmenter()
+        return self.subject_segmenter
+
+    def preview_subject(self):
+        if not self.subject_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        output_dir = self.subject_output_dir.get()
+        if not output_dir:
+            messagebox.showwarning("警告", "请选择输出目录！")
+            return
+
+        self.status_var.set("正在预览主体识别...")
+        self.progress.start()
+
+        def preview_thread():
+            try:
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                segmenter = self._get_subject_segmenter()
+                
+                for img_path in self.subject_paths:
+                    base = os.path.splitext(os.path.basename(img_path))[0]
+                    out = os.path.join(output_dir, f"{base}_preview.png")
+                    segmenter.segment_subject(img_path, out, output_type="highlight")
+                    self.progress_queue.put(("status", f"预览已保存: {out}"))
+                
+                self.progress_queue.put((
+                    "success",
+                    f"预览完成！\n红色高亮区域 = 检测到的主体\n输出目录: {output_dir}",
+                ))
+            except Exception as e:
+                import traceback
+                self.progress_queue.put(("error", traceback.format_exc()))
+
+        threading.Thread(target=preview_thread, daemon=True).start()
+
+    def start_subject_segment(self):
+        if not self.subject_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        output_dir = self.subject_output_dir.get()
+        if not output_dir:
+            messagebox.showwarning("警告", "请选择输出目录！")
+            return
+
+        self.status_var.set("正在识别主体...")
+        self.progress.start()
+
+        def segment_thread():
+            try:
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                segmenter = self._get_subject_segmenter()
+                output_type = self.subject_output_type.get()
+                base_name = self.subject_base_name.get()
+                
+                success_count = 0
+                
+                for idx, img_path in enumerate(self.subject_paths):
+                    self.progress_queue.put(("status", f"正在处理: {os.path.basename(img_path)}"))
+                    
+                    img_base = f"{base_name}_{idx + 1}" if len(self.subject_paths) > 1 else base_name
+                    out = os.path.join(output_dir, f"{img_base}.png")
+                    
+                    success = segmenter.segment_subject(img_path, out, output_type=output_type)
+                    if success:
+                        success_count += 1
+                
+                self.progress_queue.put((
+                    "success",
+                    f"主体识别完成！\n成功处理 {success_count} 张图片\n输出目录: {output_dir}",
+                ))
+            except Exception as e:
+                import traceback
+                self.progress_queue.put(("error", traceback.format_exc()))
+
+        threading.Thread(target=segment_thread, daemon=True).start()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 杂物去除功能
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    def create_object_tab(self, parent):
+        # ── 输入图片 ──────────────────────────────────────────────────────
+        input_frame = ttk.LabelFrame(parent, text="输入图片", padding="10")
+        input_frame.grid(row=0, column=0, sticky="nsew", pady=5)
+
+        btn_frame = ttk.Frame(input_frame)
+        btn_frame.grid(row=0, column=0, columnspan=2, pady=5)
+
+        ttk.Button(btn_frame, text="选择图片",
+                   command=self.select_object_image).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_frame, text="清空",
+                   command=self.clear_object_images).grid(row=0, column=1, padx=5)
+
+        self.object_image_label = ttk.Label(input_frame, text="未选择图片")
+        self.object_image_label.grid(row=1, column=0, pady=5)
+
+        # ── 去除选项 ──────────────────────────────────────────────────────
+        options_frame = ttk.LabelFrame(parent, text="去除选项", padding="10")
+        options_frame.grid(row=1, column=0, sticky="ew", pady=5)
+
+        ttk.Label(options_frame, text="检测类型:").grid(row=0, column=0, sticky=tk.W)
+        self.object_detect_type = tk.StringVar(value="manual")
+        detect_combo = ttk.Combobox(
+            options_frame, textvariable=self.object_detect_type,
+            values=["manual", "text", "people", "auto"],
+            state="readonly", width=15,
+        )
+        detect_combo.grid(row=0, column=1, padx=5)
+        detect_combo.bind("<<ComboboxSelected>>", self._on_detect_type_change)
+        ttk.Label(options_frame,
+                  text="manual=手动选择 | text=文字 | people=人物 | auto=自动检测").grid(
+            row=0, column=2, padx=5, sticky=tk.W)
+
+        # Mask选择（手动模式）
+        self.mask_frame = ttk.Frame(options_frame)
+        self.mask_frame.grid(row=1, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+        
+        ttk.Label(self.mask_frame, text="Mask图片:").grid(row=0, column=0, sticky=tk.W)
+        self.object_mask_path = tk.StringVar()
+        ttk.Entry(self.mask_frame, textvariable=self.object_mask_path, width=40).grid(row=0, column=1, padx=5)
+        ttk.Button(self.mask_frame, text="选择Mask",
+                   command=self.select_object_mask).grid(row=0, column=2)
+        ttk.Label(self.mask_frame, text="(白色区域将被移除)", foreground="gray").grid(row=0, column=3, padx=5)
+
+        # 修复方法
+        ttk.Label(options_frame, text="修复方法:").grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+        self.object_repair_method = tk.StringVar(value="auto")
+        repair_combo = ttk.Combobox(
+            options_frame, textvariable=self.object_repair_method,
+            values=["auto", "lama", "cv2"],
+            state="readonly", width=15,
+        )
+        repair_combo.grid(row=2, column=1, padx=5, pady=(10, 0), sticky=tk.W)
+        ttk.Label(options_frame, text="auto=自动选择 | lama=大范围修复 | cv2=快速修复").grid(
+            row=2, column=2, padx=5, pady=(10, 0), sticky=tk.W)
+
+        # ── 输出设置 ──────────────────────────────────────────────────────
+        output_frame = ttk.LabelFrame(parent, text="输出设置", padding="10")
+        output_frame.grid(row=2, column=0, sticky="ew", pady=5)
+
+        ttk.Label(output_frame, text="输出目录:").grid(row=0, column=0, sticky=tk.W)
+        self.object_output_dir = tk.StringVar()
+        ttk.Entry(output_frame, textvariable=self.object_output_dir, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(output_frame, text="浏览", command=self.browse_object_output_dir).grid(row=0, column=2)
+
+        ttk.Label(output_frame, text="输出文件名:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.object_output_name = tk.StringVar(value="removed")
+        ttk.Entry(output_frame, textvariable=self.object_output_name, width=50).grid(row=1, column=1, padx=5, pady=(10, 0))
+
+        # ── 按钮 ──────────────────────────────────────────────────────────
+        btn_frame2 = ttk.Frame(parent)
+        btn_frame2.grid(row=3, column=0, pady=20)
+
+        ttk.Button(btn_frame2, text="预览检测区域",
+                   command=self.preview_object_detection).grid(row=0, column=0, padx=10)
+        ttk.Button(btn_frame2, text="开始去除杂物",
+                   command=self.start_object_remove).grid(row=0, column=1, padx=10)
+        
+        # 初始化状态
+        self._on_detect_type_change()
+
+    def _on_detect_type_change(self, event=None):
+        detect_type = self.object_detect_type.get()
+        if detect_type == "manual":
+            for child in self.mask_frame.winfo_children():
+                try:
+                    child.config(state="normal")
+                except:
+                    pass
+        else:
+            for child in self.mask_frame.winfo_children():
+                try:
+                    if isinstance(child, ttk.Entry) or isinstance(child, ttk.Button):
+                        child.config(state="disabled")
+                except:
+                    pass
+
+    def select_object_image(self):
+        file = filedialog.askopenfilename(
+            title="选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp"), ("所有文件", "*.*")],
+        )
+        if file:
+            self.object_paths = [file]
+            self.object_image_label.config(text=os.path.basename(file))
+
+    def select_object_mask(self):
+        file = filedialog.askopenfilename(
+            title="选择Mask图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp"), ("所有文件", "*.*")],
+        )
+        if file:
+            self.object_mask_path.set(file)
+
+    def clear_object_images(self):
+        self.object_paths.clear()
+        self.object_mask_path.set("")
+        self.object_image_label.config(text="未选择图片")
+
+    def browse_object_output_dir(self):
+        directory = filedialog.askdirectory(title="选择输出目录")
+        if directory:
+            self.object_output_dir.set(directory)
+
+    def _get_object_remover(self):
+        """获取杂物去除器"""
+        if self.object_remover is None:
+            self.object_remover = ObjectRemover()
+        return self.object_remover
+
+    def preview_object_detection(self):
+        if not self.object_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        output_dir = self.object_output_dir.get()
+        if not output_dir:
+            messagebox.showwarning("警告", "请选择输出目录！")
+            return
+        
+        detect_type = self.object_detect_type.get()
+        if detect_type == "manual":
+            messagebox.showinfo("提示", "手动模式需要提供Mask图片")
+            return
+
+        self.status_var.set("正在检测目标区域...")
+        self.progress.start()
+
+        def preview_thread():
+            try:
+                import cv2
+                
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                remover = self._get_object_remover()
+                
+                for img_path in self.object_paths:
+                    img = cv2.imread(img_path)
+                    if img is None:
+                        continue
+                    
+                    # 获取检测mask
+                    mask = remover._detect_objects(img, detect_type)
+                    
+                    if mask is not None and np.sum(mask) > 0:
+                        # 创建预览图（红色标记检测区域）
+                        overlay = img.copy()
+                        overlay[mask > 0] = [0, 0, 255]
+                        preview = cv2.addWeighted(img, 0.7, overlay, 0.3, 0)
+                        
+                        base = os.path.splitext(os.path.basename(img_path))[0]
+                        out = os.path.join(output_dir, f"{base}_detect_preview.png")
+                        cv2.imwrite(out, preview)
+                        self.progress_queue.put(("status", f"预览已保存: {out}"))
+                    else:
+                        self.progress_queue.put(("status", f"{os.path.basename(img_path)}: 未检测到目标"))
+                
+                self.progress_queue.put((
+                    "success",
+                    f"检测预览完成！\n红色区域 = 将被移除的区域\n输出目录: {output_dir}",
+                ))
+            except Exception as e:
+                import traceback
+                self.progress_queue.put(("error", traceback.format_exc()))
+
+        threading.Thread(target=preview_thread, daemon=True).start()
+
+    def start_object_remove(self):
+        if not self.object_paths:
+            messagebox.showwarning("警告", "请先选择图片！")
+            return
+        output_dir = self.object_output_dir.get()
+        if not output_dir:
+            messagebox.showwarning("警告", "请选择输出目录！")
+            return
+
+        detect_type = self.object_detect_type.get()
+        if detect_type == "manual" and not self.object_mask_path.get():
+            messagebox.showwarning("警告", "手动模式需要选择Mask图片！")
+            return
+
+        self.status_var.set("正在去除杂物...")
+        self.progress.start()
+
+        def remove_thread():
+            try:
+                import cv2
+                
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                remover = self._get_object_remover()
+                method = self.object_repair_method.get()
+                detect_type = self.object_detect_type.get()
+                
+                success_count = 0
+                
+                for img_path in self.object_paths:
+                    self.progress_queue.put(("status", f"正在处理: {os.path.basename(img_path)}"))
+                    
+                    base = os.path.splitext(os.path.basename(img_path))[0]
+                    out = os.path.join(output_dir, f"{base}_cleaned.png")
+                    
+                    if detect_type == "manual":
+                        # 手动模式：使用提供的mask
+                        mask_path = self.object_mask_path.get()
+                        success = remover.remove_object(img_path, mask_path, out, method=method)
+                    else:
+                        # 自动检测模式
+                        success = remover.remove_objects_by_detection(img_path, out, detect_type=detect_type, method=method)
+                    
+                    if success:
+                        success_count += 1
+                
+                self.progress_queue.put((
+                    "success",
+                    f"杂物去除完成！\n成功处理 {success_count} 张图片\n输出目录: {output_dir}",
+                ))
+            except Exception as e:
+                import traceback
+                self.progress_queue.put(("error", traceback.format_exc()))
+
+        threading.Thread(target=remove_thread, daemon=True).start()
 
 
 def main():
