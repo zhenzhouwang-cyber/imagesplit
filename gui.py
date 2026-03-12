@@ -320,34 +320,82 @@ class ImageToolGUI:
         self.bg_custom_entry.grid(row=2, column=1, padx=5, pady=(10, 0), sticky=tk.W)
         self.bg_custom_entry.config(state="disabled")
 
+        # ── 主体保留控制（新增）──────────────────────────────────────────────
+        ttk.Separator(options_frame, orient="horizontal").grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(15, 10))
+        
+        ttk.Label(options_frame, text="【主体保留控制】", font=("", 9, "bold")).grid(
+            row=4, column=0, columnspan=2, sticky=tk.W)
+        ttk.Label(options_frame, text="调整以下参数防止主体被误删", foreground="gray").grid(
+            row=4, column=2, sticky=tk.W)
+
+        ttk.Label(options_frame, text="主体保留强度:").grid(row=5, column=0, sticky=tk.W, pady=(10, 0))
+        self.bg_subject_strength = tk.DoubleVar(value=1.0)
+        strength_frame = ttk.Frame(options_frame)
+        strength_frame.grid(row=5, column=1, pady=(10, 0), sticky=tk.W)
+        self.strength_scale = ttk.Scale(strength_frame, from_=0.5, to=2.0, 
+                                         variable=self.bg_subject_strength, 
+                                         orient=tk.HORIZONTAL, length=120)
+        self.strength_scale.grid(row=0, column=0)
+        self.strength_label = ttk.Label(strength_frame, text="1.0", width=4)
+        self.strength_label.grid(row=0, column=1, padx=5)
+        self.strength_scale.bind("<Motion>", self._on_strength_change)
+        self.strength_scale.bind("<ButtonRelease-1>", self._on_strength_change)
+        ttk.Label(options_frame, text=">1 保留更多主体，<1 去除更多背景", 
+                  foreground="gray").grid(row=5, column=2, padx=5, pady=(10, 0), sticky=tk.W)
+
+        ttk.Label(options_frame, text="边缘扩展:").grid(row=6, column=0, sticky=tk.W, pady=(5, 0))
+        self.bg_edge_expand = tk.IntVar(value=0)
+        ttk.Spinbox(options_frame, from_=0, to=50, textvariable=self.bg_edge_expand, 
+                    width=6).grid(row=6, column=1, pady=(5, 0), sticky=tk.W)
+        ttk.Label(options_frame, text="像素，扩大主体区域防边缘误删", 
+                  foreground="gray").grid(row=6, column=2, padx=5, pady=(5, 0), sticky=tk.W)
+
+        self.bg_mask_smoothing = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, variable=self.bg_mask_smoothing,
+                        text="平滑边缘（使主体边缘更柔和）").grid(
+            row=7, column=1, columnspan=2, pady=(5, 0), sticky=tk.W)
+
+        ttk.Label(options_frame, text="最小主体面积:").grid(row=8, column=0, sticky=tk.W, pady=(5, 0))
+        self.bg_min_area = tk.DoubleVar(value=0.0)
+        ttk.Spinbox(options_frame, from_=0.0, to=0.5, increment=0.05,
+                    textvariable=self.bg_min_area, width=6, format="%.2f").grid(
+            row=8, column=1, pady=(5, 0), sticky=tk.W)
+        ttk.Label(options_frame, text="比例，主体过小时保留原图", 
+                  foreground="gray").grid(row=8, column=2, padx=5, pady=(5, 0), sticky=tk.W)
+
+        # ── 精细边缘控制 ─────────────────────────────────────────────────────
+        ttk.Separator(options_frame, orient="horizontal").grid(
+            row=9, column=0, columnspan=3, sticky="ew", pady=(15, 10))
+
         ttk.Label(options_frame, text="精细边缘 (Alpha Matting):").grid(
-            row=3, column=0, sticky=tk.W, pady=(10, 0))
+            row=10, column=0, sticky=tk.W)
         self.bg_alpha_matting = tk.BooleanVar(value=False)
         ttk.Checkbutton(options_frame, variable=self.bg_alpha_matting,
                         text="启用（头发/毛发更精细，速度较慢）",
                         command=self._on_alpha_matting_change).grid(
-            row=3, column=1, columnspan=2, padx=5, pady=(10, 0), sticky=tk.W)
+            row=10, column=1, columnspan=2, padx=5, sticky=tk.W)
 
         self.am_fg_label = ttk.Label(options_frame, text="前景阈值:")
-        self.am_fg_label.grid(row=4, column=0, sticky=tk.W, pady=(5, 0))
+        self.am_fg_label.grid(row=11, column=0, sticky=tk.W, pady=(5, 0))
         self.bg_am_fg = tk.IntVar(value=240)
         self.am_fg_spin = ttk.Spinbox(options_frame, from_=0, to=255,
                                        textvariable=self.bg_am_fg, width=6)
-        self.am_fg_spin.grid(row=4, column=1, pady=(5, 0), sticky=tk.W)
+        self.am_fg_spin.grid(row=11, column=1, pady=(5, 0), sticky=tk.W)
 
         self.am_bg_label = ttk.Label(options_frame, text="背景阈值:")
-        self.am_bg_label.grid(row=5, column=0, sticky=tk.W, pady=(5, 0))
+        self.am_bg_label.grid(row=12, column=0, sticky=tk.W, pady=(5, 0))
         self.bg_am_bg = tk.IntVar(value=10)
         self.am_bg_spin = ttk.Spinbox(options_frame, from_=0, to=255,
                                        textvariable=self.bg_am_bg, width=6)
-        self.am_bg_spin.grid(row=5, column=1, pady=(5, 0), sticky=tk.W)
+        self.am_bg_spin.grid(row=12, column=1, pady=(5, 0), sticky=tk.W)
 
         self.am_erode_label = ttk.Label(options_frame, text="腐蚀大小:")
-        self.am_erode_label.grid(row=6, column=0, sticky=tk.W, pady=(5, 0))
+        self.am_erode_label.grid(row=13, column=0, sticky=tk.W, pady=(5, 0))
         self.bg_am_erode = tk.IntVar(value=10)
         self.am_erode_spin = ttk.Spinbox(options_frame, from_=0, to=50,
                                           textvariable=self.bg_am_erode, width=6)
-        self.am_erode_spin.grid(row=6, column=1, pady=(5, 0), sticky=tk.W)
+        self.am_erode_spin.grid(row=13, column=1, pady=(5, 0), sticky=tk.W)
 
         # 初始隐藏 alpha matting 参数
         self._on_alpha_matting_change()
@@ -405,6 +453,10 @@ class ImageToolGUI:
         state = "normal" if self.bg_alpha_matting.get() else "disabled"
         for w in (self.am_fg_spin, self.am_bg_spin, self.am_erode_spin):
             w.config(state=state)
+
+    def _on_strength_change(self, event=None):
+        """更新主体保留强度显示。"""
+        self.strength_label.config(text=f"{self.bg_subject_strength.get():.1f}")
 
     def _get_bg_color(self):
         """根据界面选项返回背景色元组或 None（透明）。"""
@@ -472,11 +524,21 @@ class ImageToolGUI:
                 self.bg_remover.set_model(model)
                 if not os.path.exists(output_dir):
                     os.makedirs(output_dir)
+                
+                # 获取主体保留参数
+                subject_strength = self.bg_subject_strength.get()
+                edge_expand = self.bg_edge_expand.get()
+                mask_smoothing = self.bg_mask_smoothing.get()
 
                 for img_path in self.bg_remove_paths:
                     base = os.path.splitext(os.path.basename(img_path))[0]
                     out = os.path.join(output_dir, f"{base}_mask_preview.png")
-                    self.bg_remover.preview_mask(img_path, out)
+                    self.bg_remover.preview_mask(
+                        img_path, out,
+                        subject_strength=subject_strength,
+                        edge_expand=edge_expand,
+                        mask_smoothing=mask_smoothing,
+                    )
                     self.progress_queue.put(("status", f"预览已保存: {out}"))
 
                 self.progress_queue.put((
@@ -521,6 +583,12 @@ class ImageToolGUI:
                 am_fg = self.bg_am_fg.get()
                 am_bg = self.bg_am_bg.get()
                 am_erode = self.bg_am_erode.get()
+                
+                # 主体保留参数
+                subject_strength = self.bg_subject_strength.get()
+                edge_expand = self.bg_edge_expand.get()
+                mask_smoothing = self.bg_mask_smoothing.get()
+                min_area = self.bg_min_area.get()
 
                 success_count = 0
                 total = len(self.bg_remove_paths)
@@ -549,6 +617,10 @@ class ImageToolGUI:
                             alpha_matting_foreground_threshold=am_fg,
                             alpha_matting_background_threshold=am_bg,
                             alpha_matting_erode_size=am_erode,
+                            subject_strength=subject_strength,
+                            edge_expand=edge_expand,
+                            mask_smoothing=mask_smoothing,
+                            min_subject_area=min_area,
                         )
                         # 替换原文件（tmp 已是 .png，直接 rename 到目标路径）
                         if os.path.exists(out_path):
@@ -573,13 +645,17 @@ class ImageToolGUI:
 
                     output_paths = self.bg_remover.remove_background_batch(
                         self.bg_remove_paths,
-                        output_dir,
-                        base_name=base_name,
+                        output_dir or "",
+                        base_name=base_name or "nobg",
                         bg_color=bg_color,
                         alpha_matting=alpha_matting,
                         alpha_matting_foreground_threshold=am_fg,
                         alpha_matting_background_threshold=am_bg,
                         alpha_matting_erode_size=am_erode,
+                        subject_strength=subject_strength,
+                        edge_expand=edge_expand,
+                        mask_smoothing=mask_smoothing,
+                        min_subject_area=min_area,
                         progress_callback=on_progress,
                     )
                     self.progress_queue.put((
