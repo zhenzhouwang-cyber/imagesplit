@@ -15,20 +15,25 @@ from text_remover import TextRemover
 from background_remover import BackgroundRemover
 from subject_segmenter import SubjectSegmenter, SimpleSegmenter
 from object_remover import ObjectRemover, SimpleObjectRemover
+from style_config import configure_styles, COLORS, FONTS
 
 
 class ImageToolGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("图像工具箱 v7.0")
-        self.root.geometry("980x900")
+        self.root.geometry("1000x920")
+        self.root.configure(bg=COLORS['bg_primary'])
+        
+        # 应用样式
+        configure_styles()
         
         self.detector = None
         self.smart_detector = SmartSplitDetector()
         self.text_remover = TextRemover()
         self.bg_remover = BackgroundRemover()
-        self.subject_segmenter = None  # 延迟加载
-        self.object_remover = None     # 延迟加载
+        self.subject_segmenter = None
+        self.object_remover = None
         self.image_paths = []
         self.split_batch_paths = []
         self.text_remove_paths = []
@@ -44,7 +49,7 @@ class ImageToolGUI:
         self.check_progress_queue()
     
     def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame = ttk.Frame(self.root, padding="15", style='TFrame')
         main_frame.grid(row=0, column=0, sticky="nsew")
         
         self.root.columnconfigure(0, weight=1)
@@ -53,21 +58,21 @@ class ImageToolGUI:
         notebook = ttk.Notebook(main_frame)
         notebook.grid(row=0, column=0, sticky="nsew")
         
-        stitch_frame = ttk.Frame(notebook, padding="10")
-        split_frame = ttk.Frame(notebook, padding="10")
-        text_frame = ttk.Frame(notebook, padding="10")
-        bg_frame = ttk.Frame(notebook, padding="10")
-        subject_frame = ttk.Frame(notebook, padding="10")
-        object_frame = ttk.Frame(notebook, padding="10")
-        rename_frame = ttk.Frame(notebook, padding="10")
+        stitch_frame = ttk.Frame(notebook, padding="15")
+        split_frame = ttk.Frame(notebook, padding="15")
+        text_frame = ttk.Frame(notebook, padding="15")
+        bg_frame = ttk.Frame(notebook, padding="15")
+        subject_frame = ttk.Frame(notebook, padding="15")
+        object_frame = ttk.Frame(notebook, padding="15")
+        rename_frame = ttk.Frame(notebook, padding="15")
 
-        notebook.add(stitch_frame, text="图像拼接")
-        notebook.add(split_frame, text="图像拆分")
-        notebook.add(text_frame, text="文字去除")
-        notebook.add(bg_frame, text="背景去除")
-        notebook.add(subject_frame, text="主体识别")
-        notebook.add(object_frame, text="杂物去除")
-        notebook.add(rename_frame, text="批量重命名")
+        notebook.add(stitch_frame, text="  拼接  ")
+        notebook.add(split_frame, text="  拆分  ")
+        notebook.add(text_frame, text="  去文字  ")
+        notebook.add(bg_frame, text="  去背景  ")
+        notebook.add(subject_frame, text="  主体识别  ")
+        notebook.add(object_frame, text="  杂物去除  ")
+        notebook.add(rename_frame, text="  重命名  ")
 
         self.create_stitch_tab(stitch_frame)
         self.create_split_tab(split_frame)
@@ -77,11 +82,17 @@ class ImageToolGUI:
         self.create_object_tab(object_frame)
         self.create_rename_tab(rename_frame)
         
-        self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        # 状态栏
+        status_frame = ttk.Frame(main_frame)
+        status_frame.grid(row=1, column=0, sticky="ew", pady=(15, 5))
         
-        self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
+        self.status_var = tk.StringVar(value="就绪")
+        status_bar = ttk.Label(status_frame, textvariable=self.status_var, 
+                               style='Secondary.TLabel', padding=(10, 5))
+        status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 进度条
+        self.progress = ttk.Progressbar(main_frame, mode='indeterminate', length=300)
         self.progress.grid(row=2, column=0, sticky="ew", pady=(5, 0))
     
     def create_stitch_tab(self, parent):
